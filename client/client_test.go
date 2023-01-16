@@ -57,7 +57,7 @@ type Bridge struct {
 	DatapathVersion     string            `ovsdb:"datapath_version"`
 	ExternalIDs         map[string]string `ovsdb:"external_ids"`
 	FailMode            *BridgeFailMode   `ovsdb:"fail_mode"`
-	FloodVLANs          [4096]int         `ovsdb:"flood_vlans"`
+	FloodVLANs          []int             `ovsdb:"flood_vlans"`
 	FlowTables          map[int]string    `ovsdb:"flow_tables"`
 	IPFIX               *string           `ovsdb:"ipfix"`
 	McastSnoopingEnable bool              `ovsdb:"mcast_snooping_enable"`

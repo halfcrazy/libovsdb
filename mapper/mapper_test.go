@@ -33,7 +33,7 @@ var (
 	}
 	aFloat = 42.00
 
-	aFloatSet = [10]float64{
+	aFloatSet = []float64{
 		3.0,
 		2.0,
 		42.0,
@@ -193,7 +193,7 @@ func TestMapperGetData(t *testing.T) {
 		AUUID               string            `ovsdb:"aUUID"`
 		AIntSet             []int             `ovsdb:"aIntSet"`
 		AFloat              float64           `ovsdb:"aFloat"`
-		AFloatSet           [10]float64       `ovsdb:"aFloatSet"`
+		AFloatSet           []float64         `ovsdb:"aFloatSet"`
 		YetAnotherStringSet []string          `ovsdb:"aEmptySet"`
 		AEnum               string            `ovsdb:"aEnum"`
 		AMap                map[string]string `ovsdb:"aMap"`
@@ -309,7 +309,7 @@ func TestMapperNewRow(t *testing.T) {
 	}, {
 		name: "aFloatSet",
 		objInput: &struct {
-			MyFloatSet [10]float64 `ovsdb:"aFloatSet"`
+			MyFloatSet []float64 `ovsdb:"aFloatSet"`
 		}{
 			MyFloatSet: aFloatSet,
 		},

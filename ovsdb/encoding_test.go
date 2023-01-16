@@ -97,18 +97,8 @@ func TestSet(t *testing.T) {
 			`"aa"`,
 		},
 		{
-			"string array",
-			[1]string{`aa`},
-			`"aa"`,
-		},
-		{
 			"string slice with multiple elements",
 			[]string{`aa`, `bb`},
-			`["set",["aa","bb"]]`,
-		},
-		{
-			"string array multiple elements",
-			[2]string{`aa`, `bb`},
 			`["set",["aa","bb"]]`,
 		},
 		{

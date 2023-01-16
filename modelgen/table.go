@@ -347,13 +347,6 @@ func fieldType(tableName, columnName string, column *ovsdb.ColumnSchema, enumTyp
 			}
 			return AtomicType(column.TypeObj.Key.Type)
 		}
-		// use array for columns with max > 1
-		if column.TypeObj.Max() > 1 {
-			if enumTypes && FieldEnum(tableName, columnName, column) != nil {
-				return fmt.Sprintf("[%d]%s", column.TypeObj.Max(), enumName(tableName, columnName))
-			}
-			return fmt.Sprintf("[%d]%s", column.TypeObj.Max(), AtomicType(column.TypeObj.Key.Type))
-		}
 		// use a slice
 		if enumTypes && FieldEnum(tableName, columnName, column) != nil {
 			return fmt.Sprintf("[]%s", enumName(tableName, columnName))
