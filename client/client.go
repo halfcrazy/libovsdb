@@ -1598,13 +1598,52 @@ func (o *ovsdbClient) SelectModels(ctx context.Context, result interface{}, cond
 		var colName string
 		var err error
 
-		// First, try the potentially problematic ColumnByPtr
-		colName, err = modelInfo.ColumnByPtr(mc.Field)
-		if err != nil {
-			// If ColumnByPtr failed, return the error directly.
-			o.logger.Error(err, "Failed to map condition field pointer to column", "conditionFieldType", reflect.TypeOf(mc.Field))
-			return fmt.Errorf("failed to map condition field pointer: %w", err)
+		// *** START Custom Pointer to Column Name Logic ***
+		fieldPtrVal := reflect.ValueOf(mc.Field)
+		if fieldPtrVal.Kind() != reflect.Ptr {
+			err = fmt.Errorf("condition field is not a pointer: %v (%T)", mc.Field, mc.Field)
+		} else {
+			// Get the type of the value the pointer points to
+			fieldType := fieldPtrVal.Elem().Type()
+			// Get the containing struct type (elemType was determined earlier)
+
+			// Iterate through the known fields of the struct type (elemType)
+			found := false
+			for i := 0; i < elemType.NumField(); i++ {
+				structField := elemType.Field(i)
+				// Compare the type of the struct field with the type pointed to by mc.Field
+				if structField.Type == fieldType {
+					// Basic Type Match: Assume this is the field if types match.
+					// WARNING: This is ambiguous if multiple fields have the same type!
+					// A more robust check might involve comparing field offsets relative
+					// to *some* consistent base, or requiring unique types for conditions.
+					// For now, let's use the first type match and get column from tag.
+
+					tag := structField.Tag.Get("ovsdb")
+					if tag != "" && tag != "-" {
+						colName = strings.Split(tag, ",")[0]
+
+						// Additional check: Verify this colName exists in modelInfo's fields
+						if _, ok := modelInfo.Metadata.Fields[colName]; ok {
+							found = true
+							o.logger.V(5).Info("Condition field mapped by type", "fieldType", fieldType, "foundColumn", colName)
+							break // Found a plausible match
+						} else {
+							// Tag found, but not in modelInfo - inconsistency? Log and continue searching.
+							o.logger.V(3).Info("Warning: Field type matched but column from tag not in ModelInfo", "fieldType", fieldType, "tagColumn", colName, "fieldName", structField.Name)
+						}
+					}
+				}
+			}
+			if !found {
+				err = fmt.Errorf("could not map field pointer (%T points to %s) to a known column in %s", mc.Field, fieldType.String(), elemType.String())
+			}
 		}
+
+		if err != nil {
+			return fmt.Errorf("failed to map condition field: %w", err)
+		}
+		// *** END Custom Pointer to Column Name Logic ***
 
 		// Use the determined colName for the rest
 		columnSchema := modelInfo.Metadata.TableSchema.Column(colName)
