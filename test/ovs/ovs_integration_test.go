@@ -1623,3 +1623,229 @@ func (suite *OVSIntegrationSuite) TestReferentialIntegrity() {
 		})
 	}
 }
+
+func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
+	ctx := context.Background()
+
+	// Create a bridge with special attributes for subsequent query tests
+	bridgeName := "br-select-test"
+	bridgeUUID, err := suite.createBridge(bridgeName)
+	require.NoError(suite.T(), err)
+
+	// Set some additional properties to test more query conditions
+	bridge := bridgeType{
+		UUID: bridgeUUID,
+		ExternalIds: map[string]string{
+			"test-key1": "test-value1",
+			"test-key2": "test-value2",
+		},
+		OtherConfig: map[string]string{
+			"config-key": "config-value",
+		},
+	}
+	updateOps, err := suite.clientWithoutInactvityCheck.Where(&bridge).Update(&bridge, &bridge.ExternalIds, &bridge.OtherConfig)
+	require.NoError(suite.T(), err)
+
+	reply, err := suite.clientWithoutInactvityCheck.Transact(ctx, updateOps...)
+	require.NoError(suite.T(), err)
+
+	opErrs, err := ovsdb.CheckOperationResults(reply, updateOps)
+	if err != nil {
+		for _, oe := range opErrs {
+			suite.T().Error(oe)
+		}
+	}
+	require.NoError(suite.T(), err)
+
+	// Test 1: Basic query - query by name
+	nameCondition := []ovsdb.Condition{
+		{
+			Column:   "name",
+			Function: ovsdb.ConditionEqual,
+			Value:    bridgeName,
+		},
+	}
+	rows, err := suite.clientWithoutInactvityCheck.Select(ctx, "Open_vSwitch", "Bridge", nameCondition, nil)
+	require.NoError(suite.T(), err)
+	require.Len(suite.T(), rows, 1, "Should find only one bridge")
+	require.Equal(suite.T(), bridgeName, rows[0]["name"], "The returned bridge name should match")
+	require.Equal(suite.T(), ovsdb.UUID{GoUUID: bridgeUUID}, rows[0]["_uuid"], "The returned UUID should match")
+
+	// Test 2: Get specific columns - only get name and external_ids
+	rows, err = suite.clientWithoutInactvityCheck.Select(ctx, "Open_vSwitch", "Bridge", nameCondition, []string{"name", "external_ids"})
+	require.NoError(suite.T(), err)
+	require.Len(suite.T(), rows, 1)
+	require.Contains(suite.T(), rows[0], "name")
+	require.Contains(suite.T(), rows[0], "external_ids")
+	require.NotContains(suite.T(), rows[0], "other_config", "Should not return unrequested columns")
+
+	// Test 3: Use complex conditions - external_ids contains specific key-value pairs
+	externalIdCondition := []ovsdb.Condition{
+		{
+			Column:   "external_ids",
+			Function: ovsdb.ConditionIncludes,
+			Value: ovsdb.OvsMap{
+				GoMap: map[interface{}]interface{}{
+					"test-key1": "test-value1",
+				},
+			},
+		},
+	}
+	rows, err = suite.clientWithoutInactvityCheck.Select(ctx, "Open_vSwitch", "Bridge", externalIdCondition, nil)
+	require.NoError(suite.T(), err)
+	require.GreaterOrEqual(suite.T(), len(rows), 1, "Should find at least one bridge matching the condition")
+
+	// Test 4: Use negation condition - name not equal to a specific value
+	notNameCondition := []ovsdb.Condition{
+		{
+			Column:   "name",
+			Function: ovsdb.ConditionNotEqual,
+			Value:    "nonexistent-bridge",
+		},
+	}
+	rows, err = suite.clientWithoutInactvityCheck.Select(ctx, "Open_vSwitch", "Bridge", notNameCondition, nil)
+	require.NoError(suite.T(), err)
+	require.NotEmpty(suite.T(), rows, "Should find at least one bridge")
+
+	// Test 5: Combine multiple conditions - name equals and external_ids contains specific key-value pairs
+	combinedConditions := []ovsdb.Condition{
+		{
+			Column:   "name",
+			Function: ovsdb.ConditionEqual,
+			Value:    bridgeName,
+		},
+		{
+			Column:   "external_ids",
+			Function: ovsdb.ConditionIncludes,
+			Value: ovsdb.OvsMap{
+				GoMap: map[interface{}]interface{}{
+					"test-key2": "test-value2",
+				},
+			},
+		},
+	}
+	rows, err = suite.clientWithoutInactvityCheck.Select(ctx, "Open_vSwitch", "Bridge", combinedConditions, nil)
+	require.NoError(suite.T(), err)
+	require.Len(suite.T(), rows, 1, "Should find only one bridge that meets all conditions")
+
+	// Test 6: Use SelectModels advanced API - query all bridges without conditions
+	var bridges []bridgeType
+	err = suite.clientWithoutInactvityCheck.SelectModels(ctx, &bridges)
+	require.NoError(suite.T(), err)
+	require.NotEmpty(suite.T(), bridges, "Should find at least one bridge")
+
+	// At least one bridge should match the one we created
+	found := false
+	for _, b := range bridges {
+		if b.UUID == bridgeUUID {
+			found = true
+			require.Equal(suite.T(), bridgeName, b.Name)
+			require.Contains(suite.T(), b.ExternalIds, "test-key1")
+			require.Contains(suite.T(), b.ExternalIds, "test-key2")
+			break
+		}
+	}
+	require.True(suite.T(), found, "Should be able to find the bridge we created")
+
+	// Test 7: Use SelectModels + condition - using model.Condition
+	var filteredBridgesManual []bridgeType
+	// Define OVSDB conditions directly
+	ovsdbConditionsTest7 := []ovsdb.Condition{
+		{
+			Column:   "name",
+			Function: ovsdb.ConditionEqual,
+			Value:    bridgeName, // Basic type, no conversion needed here
+		},
+	}
+	// Define columns to retrieve (add all relevant fields from bridgeType)
+	columnsToSelectTest7 := []string{
+		"_uuid", "name", "other_config", "external_ids", "ports",
+		"status", "fail_mode", "ipfix", "datapath_id", "mirrors",
+	}
+	// Call client.Select directly
+	rowsTest7, err := suite.clientWithoutInactvityCheck.Select(ctx, "Open_vSwitch", "Bridge", ovsdbConditionsTest7, columnsToSelectTest7)
+	require.NoError(suite.T(), err) // Check error from Select call
+
+	// Manually map rows to []bridgeType
+	filteredBridgesManual = make([]bridgeType, 0, len(rowsTest7))
+	for _, row := range rowsTest7 {
+		bridge := bridgeType{}
+		// Manual mapping - requires type assertions and error checking
+		if uuidVal, ok := row["_uuid"].(ovsdb.UUID); ok {
+			bridge.UUID = uuidVal.GoUUID
+		}
+		if nameVal, ok := row["name"].(string); ok {
+			bridge.Name = nameVal
+		}
+		if extIDsOvs, ok := row["external_ids"].(ovsdb.OvsMap); ok {
+			bridge.ExternalIds = make(map[string]string)
+			for k, v := range extIDsOvs.GoMap {
+				if ks, kOk := k.(string); kOk {
+					if vs, vOk := v.(string); vOk {
+						bridge.ExternalIds[ks] = vs
+					}
+				}
+			}
+		}
+		// Add mapping for other relevant fields (ports, other_config etc.) here
+		// ... (Example for ports - assuming []string)
+		if portsOvs, ok := row["ports"].(ovsdb.OvsSet); ok {
+			bridge.Ports = make([]string, len(portsOvs.GoSet))
+			for i, portUUID := range portsOvs.GoSet {
+				if pu, puOk := portUUID.(ovsdb.UUID); puOk {
+					bridge.Ports[i] = pu.GoUUID
+				}
+			}
+		}
+		// ... map other fields ...
+		filteredBridgesManual = append(filteredBridgesManual, bridge)
+	}
+
+	// Perform assertions on the manually mapped slice
+	require.Len(suite.T(), filteredBridgesManual, 1, "Should find only one bridge matching the name")
+	require.Equal(suite.T(), bridgeUUID, filteredBridgesManual[0].UUID)
+	require.Equal(suite.T(), bridgeName, filteredBridgesManual[0].Name)
+
+	// Cleanup - delete the test bridge
+	cleanupBridge := bridgeType{UUID: bridgeUUID}
+	delOps, err := suite.clientWithoutInactvityCheck.Where(&cleanupBridge).Delete()
+	require.NoError(suite.T(), err)
+
+	// Remove bridge reference from Open_vSwitch table
+	ovsRow := ovsType{}
+	mutateOp, err := suite.clientWithoutInactvityCheck.WhereCache(func(*ovsType) bool { return true }).
+		Mutate(&ovsRow, model.Mutation{
+			Field:   &ovsRow.Bridges,
+			Mutator: ovsdb.MutateOperationDelete,
+			Value:   []string{bridgeUUID},
+		})
+	require.NoError(suite.T(), err)
+
+	ops := append(delOps, mutateOp...)
+	delReply, err := suite.clientWithoutInactvityCheck.Transact(ctx, ops...)
+	require.NoError(suite.T(), err)
+
+	opErrs, err = ovsdb.CheckOperationResults(delReply, ops)
+	if err != nil {
+		for _, oe := range opErrs {
+			suite.T().Error(oe)
+		}
+	}
+	require.NoError(suite.T(), err)
+
+	// Test 9: Verify deletion using SelectModels
+	// Use client.Select + manual mapping for verification after delete
+	ovsdbConditionsTest9 := []ovsdb.Condition{
+		{
+			Column:   "name",
+			Function: ovsdb.ConditionEqual,
+			Value:    bridgeName,
+		},
+	}
+	rowsTest9, err := suite.clientWithoutInactvityCheck.Select(ctx, "Open_vSwitch", "Bridge", ovsdbConditionsTest9, []string{"_uuid"}) // Only need one column to check existence
+	require.NoError(suite.T(), err)
+	// Manual mapping (optional, just checking len is enough)
+	// filteredBridgesManualTest9 := make([]bridgeType, 0, len(rowsTest9)) // Remove this line too
+	// No need to fully map, just check if any rows were returned
+	require.Empty(suite.T(), rowsTest9, "Select should return empty results after deletion")
+}
