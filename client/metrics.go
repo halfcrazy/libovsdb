@@ -13,6 +13,7 @@ type metrics struct {
 	numTableUpdates *prometheus.CounterVec
 	numDisconnects  prometheus.Counter
 	numMonitors     prometheus.Gauge
+	cacheEntries    *prometheus.GaugeVec
 	registerOnce    sync.Once
 }
 
@@ -66,6 +67,17 @@ func (m *metrics) init(modelName string, namespace, subsystem string) {
 			ConstLabels: constLabels,
 		},
 	)
+
+	m.cacheEntries = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "cache_entries",
+			Help:        "Number of entries in libovsdb cache, partitioned by database and table",
+			ConstLabels: constLabels,
+		},
+		[]string{"database", "table"},
+	)
 }
 
 func (m *metrics) register(r prometheus.Registerer) {
@@ -75,6 +87,7 @@ func (m *metrics) register(r prometheus.Registerer) {
 			m.numTableUpdates,
 			m.numDisconnects,
 			m.numMonitors,
+			m.cacheEntries,
 		)
 	})
 }

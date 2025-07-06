@@ -393,6 +393,13 @@ func (o *ovsdbClient) tryEndpoint(ctx context.Context, u *url.URL) (string, erro
 				return "", err
 			}
 			db.api = newAPI(db.cache, o.logger)
+			if o.options.registry != nil {
+				handler := &cacheMetrics{
+					dbName:       db.model.Schema.Name,
+					cacheEntries: o.metrics.cacheEntries,
+				}
+				db.cache.AddEventHandler(handler)
+			}
 		}
 		db.cacheMutex.Unlock()
 	}
