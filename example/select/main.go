@@ -22,12 +22,13 @@ const (
 
 // --- Bridge model definition for SelectModels ---
 type Bridge struct {
-	UUID        string            `ovsdb:"_uuid"`
-	Name        string            `ovsdb:"name"`
-	Ports       []string          `ovsdb:"ports"` // Simplified: stores port UUIDs as strings
-	ExternalIDs map[string]string `ovsdb:"external_ids"`
-	OtherConfig map[string]string `ovsdb:"other_config"`
-	FailMode    *string           `ovsdb:"fail_mode"` // Example of optional field
+	UUID         string            `ovsdb:"_uuid"`
+	Name         string            `ovsdb:"name"`
+	Ports        []string          `ovsdb:"ports"` // Simplified: stores port UUIDs as strings
+	ExternalIDs  map[string]string `ovsdb:"external_ids"`
+	OtherConfig  map[string]string `ovsdb:"other_config"`
+	FailMode     *string           `ovsdb:"fail_mode"`     // Example of optional field
+	DatapathType *string           `ovsdb:"datapath_type"` // Added for Example 3
 }
 
 func main() {
@@ -59,7 +60,7 @@ func main() {
 
 	logger.Info("Successfully connected to OVSDB", "endpoint", ovs.CurrentEndpoint())
 
-	logger.Info("=== ConditionalAPI.Select Examples - Using WhereXxx, Select, Transact, and ParseSelectResult ===")
+	logger.Info("=== ConditionalAPI.Select Examples - Using WhereXxx, Select, Transact, and GetSelectResults ===")
 
 	// The client instance (`ovs`) itself implements the API interface.
 
@@ -68,28 +69,28 @@ func main() {
 	var allBridges []Bridge
 	// 1. Generate the Select operation.
 	//    Use Where(&Model{}) to specify the table for select-all.
-	selectOpAll, err := ovs.Where(&Bridge{}).Select() // Use Where().Select() for select all
+	ops, queryIDAll, err := ovs.Where(&Bridge{}).Select() // Use Where().Select() for select all
 	if err != nil {
 		logger.Error(err, "Failed to generate select all operation")
 		os.Exit(1)
 	}
 
 	// 2. Execute the operation using Transact
-	reply, err := ovs.Transact(ctx, selectOpAll...)
+	results, err := ovs.Transact(ctx, ops...)
 	if err != nil {
 		logger.Error(err, "Transact failed for select all")
 		os.Exit(1)
 	}
 
 	// 3. Check transact results for errors
-	opErrs, err := ovsdb.CheckOperationResults(reply, selectOpAll)
+	opErrs, err := ovsdb.CheckOperationResults(results, ops)
 	if err != nil {
 		logger.Error(err, "Error in transact results for select all", "op_errors", opErrs)
 		os.Exit(1)
 	}
 
 	// 4. Parse the select results from the first operation result
-	err = ovs.ParseSelectResult(reply[0], &allBridges)
+	err = ovs.GetSelectResults(ops, results, map[string]interface{}{queryIDAll: &allBridges})
 	if err != nil {
 		logger.Error(err, "Failed to parse select all results")
 		os.Exit(1)
@@ -113,28 +114,28 @@ func main() {
 	}
 
 	// 1. Generate the Select operation using WhereAll
-	selectOpSpecific, err := ovs.WhereAll(&Bridge{}, cond).Select() // Chain Select after WhereAll
+	ops, queryIDSpecific, err := ovs.WhereAll(&Bridge{}, cond).Select() // Chain Select after WhereAll
 	if err != nil {
 		logger.Error(err, "Failed to generate select specific operation")
 		os.Exit(1)
 	}
 
 	// 2. Execute the operation using Transact
-	replySpecific, err := ovs.Transact(ctx, selectOpSpecific...)
+	results, err = ovs.Transact(ctx, ops...)
 	if err != nil {
 		logger.Error(err, "Transact failed for select specific")
 		os.Exit(1)
 	}
 
 	// 3. Check transact results
-	opErrsSpecific, err := ovsdb.CheckOperationResults(replySpecific, selectOpSpecific)
+	opErrsSpecific, err := ovsdb.CheckOperationResults(results, ops)
 	if err != nil {
 		logger.Error(err, "Error in transact results for select specific", "op_errors", opErrsSpecific)
 		os.Exit(1)
 	}
 
 	// 4. Parse the select results
-	err = ovs.ParseSelectResult(replySpecific[0], &specificBridges)
+	err = ovs.GetSelectResults(ops, results, map[string]interface{}{queryIDSpecific: &specificBridges})
 	if err != nil {
 		logger.Error(err, "Failed to parse select specific results")
 		os.Exit(1)
@@ -176,28 +177,28 @@ func main() {
 	}
 
 	// 1. Generate the Select operation using WhereAll with multiple conditions
-	selectOpMulti, err := ovs.WhereAll(&Bridge{}, condMulti1, condMulti2).Select()
+	ops, queryIDMulti, err := ovs.WhereAll(&Bridge{}, condMulti1, condMulti2).Select()
 	if err != nil {
 		logger.Error(err, "Failed to generate select multi-condition operation")
 		os.Exit(1)
 	}
 
 	// 2. Execute the operation using Transact
-	replyMulti, err := ovs.Transact(ctx, selectOpMulti...)
+	results, err = ovs.Transact(ctx, ops...)
 	if err != nil {
 		logger.Error(err, "Transact failed for select multi-condition")
 		os.Exit(1)
 	}
 
 	// 3. Check transact results
-	opErrsMulti, err := ovsdb.CheckOperationResults(replyMulti, selectOpMulti)
+	opErrsMulti, err := ovsdb.CheckOperationResults(results, ops)
 	if err != nil {
 		logger.Error(err, "Error in transact results for select multi-condition", "op_errors", opErrsMulti)
 		os.Exit(1)
 	}
 
 	// 4. Parse the select results
-	err = ovs.ParseSelectResult(replyMulti[0], &specificBridgesMultiCond)
+	err = ovs.GetSelectResults(ops, results, map[string]interface{}{queryIDMulti: &specificBridgesMultiCond})
 	if err != nil {
 		logger.Error(err, "Failed to parse select multi-condition results")
 		os.Exit(1)
@@ -225,28 +226,28 @@ func main() {
 
 	// 1. Generate the Select operation using WhereAll and specifying columns in Select()
 	//    Only "name" and "fail_mode" will be populated in the result. _uuid is always included.
-	selectOpPartial, err := ovs.WhereAll(&Bridge{}, cond).Select("name", "fail_mode")
+	ops, queryIDPartial, err := ovs.WhereAll(&Bridge{}, cond).Select("name", "fail_mode")
 	if err != nil {
 		logger.Error(err, "Failed to generate select partial column operation")
 		os.Exit(1)
 	}
 
 	// 2. Execute the operation
-	replyPartial, err := ovs.Transact(ctx, selectOpPartial...)
+	results, err = ovs.Transact(ctx, ops...)
 	if err != nil {
 		logger.Error(err, "Transact failed for select partial column")
 		os.Exit(1)
 	}
 
 	// 3. Check transact results
-	opErrsPartial, err := ovsdb.CheckOperationResults(replyPartial, selectOpPartial)
+	opErrsPartial, err := ovsdb.CheckOperationResults(results, ops)
 	if err != nil {
 		logger.Error(err, "Error in transact results for select partial column", "op_errors", opErrsPartial)
 		os.Exit(1)
 	}
 
 	// 4. Parse the select results
-	err = ovs.ParseSelectResult(replyPartial[0], &partialBridges)
+	err = ovs.GetSelectResults(ops, results, map[string]interface{}{queryIDPartial: &partialBridges})
 	if err != nil {
 		logger.Error(err, "Failed to parse select partial column results")
 		os.Exit(1)

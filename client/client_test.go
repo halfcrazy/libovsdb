@@ -1464,6 +1464,7 @@ func TestConditionalAPISelect(t *testing.T) {
 		errorContains  string
 		expectedWhere  []ovsdb.Condition
 		expectedTable  string
+		expectedOps    []ovsdb.Operation
 	}{
 		{
 			name: "Select after Where",
@@ -1473,6 +1474,17 @@ func TestConditionalAPISelect(t *testing.T) {
 			expectError:   false,
 			expectedWhere: []ovsdb.Condition{{Column: "name", Function: ovsdb.ConditionEqual, Value: "br-selcond"}}, // Equality condition from index
 			expectedTable: "Bridge",
+			expectedOps: func() []ovsdb.Operation {
+				expected := []ovsdb.Operation{
+					{
+						Op:      ovsdb.OperationSelect,
+						Table:   "Bridge",
+						Where:   []ovsdb.Condition{ovsdb.NewCondition("name", ovsdb.ConditionEqual, "br-selcond")},
+						Columns: expectedCols,
+					},
+				}
+				return expected
+			}(),
 		},
 		{
 			name: "Select after WhereAll",
@@ -1486,6 +1498,17 @@ func TestConditionalAPISelect(t *testing.T) {
 			expectError:   false,
 			expectedWhere: []ovsdb.Condition{{Column: "name", Function: ovsdb.ConditionNotEqual, Value: "some-other-bridge"}},
 			expectedTable: "Bridge",
+			expectedOps: func() []ovsdb.Operation {
+				expected := []ovsdb.Operation{
+					{
+						Op:      ovsdb.OperationSelect,
+						Table:   "Bridge",
+						Where:   []ovsdb.Condition{ovsdb.NewCondition("name", ovsdb.ConditionNotEqual, "some-other-bridge")},
+						Columns: expectedCols,
+					},
+				}
+				return expected
+			}(),
 		},
 		{
 			name: "Select after WhereAll with multiple conditions (string and bool)",
@@ -1509,6 +1532,20 @@ func TestConditionalAPISelect(t *testing.T) {
 				{Column: "stp_enable", Function: ovsdb.ConditionEqual, Value: true},
 			},
 			expectedTable: "Bridge",
+			expectedOps: func() []ovsdb.Operation {
+				expected := []ovsdb.Operation{
+					{
+						Op:    ovsdb.OperationSelect,
+						Table: "Bridge",
+						Where: []ovsdb.Condition{
+							{Column: "name", Function: ovsdb.ConditionEqual, Value: "br-multi1"},
+							{Column: "stp_enable", Function: ovsdb.ConditionEqual, Value: true},
+						},
+						Columns: expectedCols,
+					},
+				}
+				return expected
+			}(),
 		},
 		{
 			name: "Select after WhereAll with multiple conditions (string and map includes)",
@@ -1532,14 +1569,20 @@ func TestConditionalAPISelect(t *testing.T) {
 				{Column: "external_ids", Function: ovsdb.ConditionIncludes, Value: testOvsMap(t, map[string]string{"key": "value"})},
 			},
 			expectedTable: "Bridge",
-		},
-		{
-			name: "Error: Select after WhereAny",
-			conditionalAPI: func(api API) ConditionalAPI {
-				return api.WhereAny(bridgeModelCtx, model.Condition{Field: &bridgeModelCtx.Name, Function: ovsdb.ConditionEqual, Value: "a"})
-			},
-			expectError:   true,
-			errorContains: "WhereAny",
+			expectedOps: func() []ovsdb.Operation {
+				expected := []ovsdb.Operation{
+					{
+						Op:    ovsdb.OperationSelect,
+						Table: "Bridge",
+						Where: []ovsdb.Condition{
+							{Column: "name", Function: ovsdb.ConditionNotEqual, Value: "br-exclude"},
+							{Column: "external_ids", Function: ovsdb.ConditionIncludes, Value: testOvsMap(t, map[string]string{"key": "value"})},
+						},
+						Columns: expectedCols,
+					},
+				}
+				return expected
+			}(),
 		},
 		{
 			name: "Error: Select after WhereCache",
@@ -1547,17 +1590,34 @@ func TestConditionalAPISelect(t *testing.T) {
 				return api.WhereCache(func(_ *Bridge) bool { return true })
 			},
 			expectError:   true,
-			errorContains: "cache predicate function",
+			errorContains: "WhereCache",
 		},
 		{
-			name: "Model table check (removed from Select)",
+			name: "Success: Select after WhereAny with multiple OR conditions",
 			conditionalAPI: func(api API) ConditionalAPI {
-				// Condition on Bridge table
-				return api.Where(bridgeModel)
+				return api.WhereAny(bridgeModelCtx,
+					model.Condition{Field: &bridgeModelCtx.Name, Function: ovsdb.ConditionEqual, Value: "a"},
+					model.Condition{Field: &bridgeModelCtx.OtherConfig, Function: ovsdb.ConditionIncludes, Value: map[string]string{"foo": "bar"}},
+				)
 			},
-			expectError:   false,
-			expectedWhere: []ovsdb.Condition{{Column: "name", Function: ovsdb.ConditionEqual, Value: "br-selcond"}},
-			expectedTable: "Bridge",
+			expectedOps: func() []ovsdb.Operation {
+				expected := []ovsdb.Operation{
+					{
+						Op:      ovsdb.OperationSelect,
+						Table:   "Bridge",
+						Where:   []ovsdb.Condition{ovsdb.NewCondition("name", ovsdb.ConditionEqual, "a")},
+						Columns: expectedCols,
+					},
+					{
+						Op:    ovsdb.OperationSelect,
+						Table: "Bridge",
+						Where: []ovsdb.Condition{ovsdb.NewCondition("other_config", ovsdb.ConditionIncludes,
+							ovsdb.OvsMap{GoMap: map[interface{}]interface{}{"foo": "bar"}})},
+						Columns: expectedCols,
+					},
+				}
+				return expected
+			}(),
 		},
 	}
 
@@ -1565,10 +1625,11 @@ func TestConditionalAPISelect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var ops []ovsdb.Operation
 			var err error
+			var queryID string
 
 			// For other cases, use the conditionalAPI function
 			condAPI := tt.conditionalAPI(ovsClientForDefDB)
-			ops, err = condAPI.Select()
+			ops, queryID, err = condAPI.Select()
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -1578,222 +1639,220 @@ func TestConditionalAPISelect(t *testing.T) {
 				assert.Nil(t, ops)
 			} else {
 				require.NoError(t, err)
-				require.Len(t, ops, 1, "Select should return exactly one operation")
-				op := ops[0]
-				assert.Equal(t, ovsdb.OperationSelect, op.Op)
-				assert.Equal(t, tt.expectedTable, op.Table)
-				assert.Equal(t, tt.expectedWhere, op.Where)
+				require.Len(t, ops, len(tt.expectedOps), "Select should return %d operation", len(tt.expectedOps))
+				assert.NotEmpty(t, queryID)
+				for i, op := range ops {
+					assert.Equal(t, tt.expectedOps[i].Op, op.Op)
+					assert.Equal(t, tt.expectedOps[i].Table, op.Table)
+					assert.Equal(t, tt.expectedOps[i].Where, op.Where)
+					assert.Equal(t, op.CorrelationID, queryID)
 
-				// Sort columns for comparison
-				actualCols := make([]string, len(op.Columns))
-				copy(actualCols, op.Columns)
-				sort.Strings(actualCols)
-				assert.Equal(t, expectedCols, actualCols, "Selected columns mismatch")
+					// Sort columns for comparison
+					actualCols := make([]string, len(op.Columns))
+					copy(actualCols, op.Columns)
+					sort.Strings(actualCols)
+					assert.Equal(t, expectedCols, actualCols, "Selected columns mismatch")
+				}
 			}
 		})
 	}
 }
 
-// TestParseSelectResult tests the parsing logic extracted from SelectModels
-func TestParseSelectResult(t *testing.T) {
-	var connectCounter, disconnectCounter int32
-	ovsClient, _, serverAddr := newClientServerPair(t, &connectCounter, &disconnectCounter, true)
-	defer ovsClient.Close()
-
-	ovsClientForDefDB, err := newOVSDBClient(defDB, WithEndpoint(serverAddr))
+func TestGetSelectResults(t *testing.T) {
+	var s ovsdb.DatabaseSchema
+	err := json.Unmarshal([]byte(schema), &s)
 	require.NoError(t, err)
-	err = ovsClientForDefDB.Connect(context.Background())
+
+	// Use a single ClientDBModel and DatabaseModel instance created within the test's scope
+	// to ensure absolute consistency.
+	clientDBModel, err := model.NewClientDBModel("Open_vSwitch", map[string]model.Model{
+		"Bridge":       &Bridge{},
+		"Open_vSwitch": &OpenvSwitch{},
+	})
 	require.NoError(t, err)
-	defer ovsClientForDefDB.Close()
 
-	// Sample data
-	uuid1 := uuid.NewString()
-	uuid2 := uuid.NewString()
-	row1 := ovsdb.Row{
-		"_uuid":         ovsdb.UUID{GoUUID: uuid1},
-		"name":          "br-parse1",
-		"datapath_type": "system",
-		"external_ids":  testOvsMap(t, map[string]string{"k1": "v1"}),
-		"stp_enable":    true,
-		"flood_vlans":   testOvsSet(t, []int{10, 20}),
-		"fail_mode":     BridgeFailModeSecure,
-	}
-	row2 := ovsdb.Row{
-		"_uuid":         ovsdb.UUID{GoUUID: uuid2},
-		"name":          "br-parse2",
-		"datapath_type": "netdev",
-		"external_ids":  testOvsMap(t, map[string]string{}), // Empty map
-		"stp_enable":    false,
-		"flood_vlans":   testOvsSet(t, []int{}), // Empty set
-		// fail_mode omitted (should be nil pointer)
+	dbModel, errs := model.NewDatabaseModel(s, clientDBModel)
+	require.Empty(t, errs)
+
+	theMapper := mapper.NewMapper(dbModel.Schema)
+
+	// Helper to create a row from a model instance, using the consistent dbModel
+	newRow := func(m model.Model) ovsdb.Row {
+		info, err := dbModel.NewModelInfo(m)
+		require.NoError(t, err)
+		row, err := theMapper.NewRow(info)
+		require.NoError(t, err)
+		return row
 	}
 
-	expectedBridge1 := Bridge{
-		UUID:                uuid1,
-		Name:                "br-parse1",
-		DatapathType:        "system",
-		ExternalIDs:         map[string]string{"k1": "v1"},
-		STPEnable:           true,
-		FloodVLANs:          []int{10, 20},
-		FailMode:            func(s BridgeFailMode) *BridgeFailMode { return &s }(BridgeFailModeSecure),
-		McastSnoopingEnable: false, // Default value
-		RSTPEnable:          false, // Default value
-	}
-	expectedBridge2 := Bridge{
-		UUID:                uuid2,
-		Name:                "br-parse2",
-		DatapathType:        "netdev",
-		ExternalIDs:         map[string]string{},
-		STPEnable:           false,
-		FloodVLANs:          []int{},
-		FailMode:            nil, // Omitted field becomes nil pointer
-		McastSnoopingEnable: false,
-		RSTPEnable:          false,
-	}
+	// === Test Data Setup ===
+	br1 := &Bridge{UUID: uuid.NewString(), Name: "br1"}
+	br2 := &Bridge{UUID: uuid.NewString(), Name: "br2"}
+	br3 := &Bridge{UUID: uuid.NewString(), Name: "br3"} // br3 will be a duplicate in the 'any' test
+	stringVal := "my-ovs"
+	ovs1 := &OpenvSwitch{UUID: uuid.NewString(), SystemType: &stringVal}
 
-	// Test cases
+	rowBr1 := newRow(br1)
+	rowBr2 := newRow(br2)
+	rowBr3 := newRow(br3)
+	rowOvs1 := newRow(ovs1)
+
+	queryIDAny := "query-any"
+	queryIDAll := "query-all"
+	queryIDMultiBridge := "query-multi-bridge"
+	queryIDMultiOVS := "query-multi-ovs"
+
 	tests := []struct {
-		name                   string
-		opResult               ovsdb.OperationResult
-		targetSlice            interface{}
-		expectErr              bool
-		expectedErrorSubstring string
-		expectedParsedResult   interface{} // Expected value in targetSlice after parse
+		name          string
+		ops           []ovsdb.Operation
+		results       []ovsdb.OperationResult
+		targets       map[string]interface{}
+		verify        func(t *testing.T, targets map[string]interface{})
+		expectError   bool
+		errorContains string
 	}{
 		{
-			name: "Success - Slice of Pointers",
-			opResult: ovsdb.OperationResult{
-				Rows: []ovsdb.Row{row1, row2},
+			name: "1. WhereAny: one queryID, multiple results with aggregation",
+			ops: []ovsdb.Operation{
+				{Op: ovsdb.OperationSelect, CorrelationID: queryIDAny},
+				{Op: ovsdb.OperationSelect, CorrelationID: queryIDAny},
 			},
-			targetSlice: &[]*Bridge{},
-			expectErr:   false,
-			expectedParsedResult: &[]*Bridge{
-				&expectedBridge1, // Corrected to include expectedBridge1
-				&expectedBridge2,
+			results: []ovsdb.OperationResult{
+				{Rows: []ovsdb.Row{rowBr1, rowBr3}},
+				{Rows: []ovsdb.Row{rowBr2, rowBr3}}, // br3 is duplicated
 			},
-		},
-		{
-			name: "Success - Slice of Structs",
-			opResult: ovsdb.OperationResult{
-				Rows: []ovsdb.Row{row1, row2},
+			targets: map[string]interface{}{
+				queryIDAny: &[]*Bridge{},
 			},
-			targetSlice: &[]Bridge{},
-			expectErr:   false,
-			expectedParsedResult: &[]Bridge{
-				expectedBridge1,
-				expectedBridge2,
+			verify: func(t *testing.T, targets map[string]interface{}) {
+				bridges := *targets[queryIDAny].(*[]*Bridge)
+				require.Len(t, bridges, 3, "should be 3 unique bridges after deduplication")
+				sortResults(bridges)
+				assert.Equal(t, "br1", bridges[0].Name)
+				assert.Equal(t, "br2", bridges[1].Name)
+				assert.Equal(t, "br3", bridges[2].Name)
 			},
 		},
 		{
-			name: "Success - Partial Columns",
-			opResult: ovsdb.OperationResult{
-				Rows: []ovsdb.Row{
-					{
-						"_uuid":         ovsdb.UUID{GoUUID: uuid1},
-						"name":          "br-partial",
-						"datapath_type": "partial-netdev",
-					},
-				},
+			name: "2. WhereAll: one queryID, one result",
+			ops: []ovsdb.Operation{
+				{Op: ovsdb.OperationSelect, CorrelationID: queryIDAll},
 			},
-			targetSlice: &[]*Bridge{},
-			expectErr:   false,
-			expectedParsedResult: &[]*Bridge{
-				{
-					UUID:         uuid1,
-					Name:         "br-partial",
-					DatapathType: "partial-netdev",
-					// All other fields should be their zero-value
-					ExternalIDs:         nil,
-					Ports:               nil,
-					FailMode:            nil,
-					STPEnable:           false,
-					McastSnoopingEnable: false,
-					RSTPEnable:          false,
-				},
+			results: []ovsdb.OperationResult{
+				{Rows: []ovsdb.Row{rowBr2}},
+			},
+			targets: map[string]interface{}{
+				queryIDAll: &[]*Bridge{},
+			},
+			verify: func(t *testing.T, targets map[string]interface{}) {
+				bridges := *targets[queryIDAll].(*[]*Bridge)
+				require.Len(t, bridges, 1)
+				assert.Equal(t, "br2", bridges[0].Name)
 			},
 		},
 		{
-			name: "Success - Empty Result",
-			opResult: ovsdb.OperationResult{
-				Rows: []ovsdb.Row{},
+			name: "3. Multi-Model: multiple queryIDs for different models",
+			ops: []ovsdb.Operation{
+				{Op: ovsdb.OperationSelect, CorrelationID: queryIDMultiBridge},
+				{Op: ovsdb.OperationSelect, CorrelationID: queryIDMultiOVS},
 			},
-			targetSlice:          &[]*Bridge{},
-			expectErr:            false,
-			expectedParsedResult: &[]*Bridge{},
-		},
-		{
-			name: "Error - OperationResult Error",
-			opResult: ovsdb.OperationResult{
-				Error:   "ovsdb_error",
-				Details: "something went wrong",
+			results: []ovsdb.OperationResult{
+				{Rows: []ovsdb.Row{rowBr1}},
+				{Rows: []ovsdb.Row{rowOvs1}},
 			},
-			targetSlice:            &[]*Bridge{},
-			expectErr:              true,
-			expectedErrorSubstring: "ovsdb_error: something went wrong",
-		},
-		{
-			name:                   "Error - Target Nil Pointer",
-			opResult:               ovsdb.OperationResult{Rows: []ovsdb.Row{row1}},
-			targetSlice:            ((*[]*Bridge)(nil)),
-			expectErr:              true,
-			expectedErrorSubstring: "targetSlice argument must be a non-nil pointer",
-		},
-		{
-			name:                   "Error - Target Not Pointer",
-			opResult:               ovsdb.OperationResult{Rows: []ovsdb.Row{row1}},
-			targetSlice:            []*Bridge{},
-			expectErr:              true,
-			expectedErrorSubstring: "targetSlice argument must be a non-nil pointer",
-		},
-		{
-			name:                   "Error - Target Pointer to Non-Slice",
-			opResult:               ovsdb.OperationResult{Rows: []ovsdb.Row{row1}},
-			targetSlice:            &Bridge{},
-			expectErr:              true,
-			expectedErrorSubstring: "targetSlice argument must be a pointer to a slice",
-		},
-		{
-			name:                   "Error - Target Slice of Non-Model",
-			opResult:               ovsdb.OperationResult{Rows: []ovsdb.Row{row1}},
-			targetSlice:            &[]int{},
-			expectErr:              true,
-			expectedErrorSubstring: "targetSlice elements must be structs or pointers to structs",
-		},
-		{
-			name: "Error - Mapping Error (wrong type in row)",
-			opResult: ovsdb.OperationResult{
-				Rows: []ovsdb.Row{
-					{
-						"_uuid": ovsdb.UUID{GoUUID: uuid.NewString()},
-						"name":  123, // Incorrect type for name
-					},
-				},
+			targets: map[string]interface{}{
+				queryIDMultiBridge: &[]*Bridge{},
+				queryIDMultiOVS:    &[]*OpenvSwitch{},
 			},
-			targetSlice:            &[]*Bridge{},
-			expectErr:              true,
-			expectedErrorSubstring: "failed to map row", // Error comes from Mapper
+			verify: func(t *testing.T, targets map[string]interface{}) {
+				bridges := *targets[queryIDMultiBridge].(*[]*Bridge)
+				ovsList := *targets[queryIDMultiOVS].(*[]*OpenvSwitch)
+				require.Len(t, bridges, 1)
+				assert.Equal(t, "br1", bridges[0].Name)
+				require.Len(t, ovsList, 1)
+				assert.Equal(t, "my-ovs", *ovsList[0].SystemType)
+			},
+		},
+		{
+			name:          "Error: mismatched ops and results length",
+			ops:           []ovsdb.Operation{{}},
+			results:       []ovsdb.OperationResult{{}, {}},
+			targets:       map[string]interface{}{},
+			expectError:   true,
+			errorContains: "must match",
+		},
+		{
+			name: "Error: OVSDB error in result",
+			ops: []ovsdb.Operation{
+				{Op: ovsdb.OperationSelect, CorrelationID: "anyID"},
+			},
+			results: []ovsdb.OperationResult{
+				{Error: "some ovsdb error", Details: "details here"},
+			},
+			targets: map[string]interface{}{
+				"anyID": &[]*Bridge{},
+			},
+			expectError:   true,
+			errorContains: "some ovsdb error",
+		},
+		{
+			name: "Error: bad target type (not a pointer)",
+			ops: []ovsdb.Operation{
+				{Op: ovsdb.OperationSelect, CorrelationID: "anyID"},
+			},
+			results: []ovsdb.OperationResult{
+				{Rows: []ovsdb.Row{rowBr1}},
+			},
+			targets: map[string]interface{}{
+				"anyID": []*Bridge{}, // Should be *[]*Bridge
+			},
+			expectError:   true,
+			errorContains: "must be a non-nil pointer",
+		},
+		{
+			name: "4. Mixed Operations: non-select ops are ignored",
+			ops: []ovsdb.Operation{
+				{Op: ovsdb.OperationInsert}, // Non-select op
+				{Op: ovsdb.OperationSelect, CorrelationID: queryIDAll},
+				{Op: ovsdb.OperationDelete}, // Non-select op
+			},
+			results: []ovsdb.OperationResult{
+				{Count: 1},                  // Result for Insert
+				{Rows: []ovsdb.Row{rowBr2}}, // Result for Select
+				{Count: 1},                  // Result for Delete
+			},
+			targets: map[string]interface{}{
+				queryIDAll: &[]*Bridge{},
+			},
+			verify: func(t *testing.T, targets map[string]interface{}) {
+				bridges := *targets[queryIDAll].(*[]*Bridge)
+				require.Len(t, bridges, 1)
+				assert.Equal(t, "br2", bridges[0].Name)
+			},
 		},
 	}
+
+	// Create an ovsdbClient using the local, consistent ClientDBModel
+	ovs, err := newOVSDBClient(clientDBModel)
+	require.NoError(t, err)
+
+	// Set up the client's internal model and cache with the correct, full database model
+	ovs.primaryDB().model = dbModel
+	ovs.primaryDB().cache, err = cache.NewTableCache(dbModel, nil, nil)
+	require.NoError(t, err)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ovsClientForDefDB.ParseSelectResult(tt.opResult, tt.targetSlice)
+			err := ovs.GetSelectResults(tt.ops, tt.results, tt.targets)
 
-			if tt.expectErr {
+			if tt.expectError {
 				require.Error(t, err)
-				if tt.expectedErrorSubstring != "" {
-					require.ErrorContains(t, err, tt.expectedErrorSubstring)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
 				}
 			} else {
 				require.NoError(t, err)
-				// Sort results if they are slices for stable comparison
-				if reflect.ValueOf(tt.targetSlice).Elem().Kind() == reflect.Slice {
-					sortResults(tt.targetSlice)
-				}
-				if reflect.ValueOf(tt.expectedParsedResult).Elem().Kind() == reflect.Slice {
-					sortResults(tt.expectedParsedResult)
-				}
-				assert.Equal(t, tt.expectedParsedResult, tt.targetSlice)
+				tt.verify(t, tt.targets)
 			}
 		})
 	}

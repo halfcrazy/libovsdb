@@ -65,9 +65,10 @@ type Client interface {
 	NewMonitor(...MonitorOption) *Monitor
 	CurrentEndpoint() string
 	API
-	// ParseSelectResult parses the result of a Select operation into the target slice.
-	// targetSlice must be a non-nil pointer to a slice of models (structs or pointers to structs).
-	ParseSelectResult(result ovsdb.OperationResult, targetSlice interface{}) error
+	// GetSelectResults parses the results of a transaction containing select operations
+	// and populates the target slices. The targets map is keyed by the correlation ID
+	// returned from the Select operation. The value is a pointer to a slice of models.
+	GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, targets map[string]interface{}) error
 }
 
 type bufferedUpdate struct {
@@ -1475,118 +1476,93 @@ func (o *ovsdbClient) WhereCache(predicate any) ConditionalAPI {
 	return o.primaryDB().api.WhereCache(predicate)
 }
 
-// ParseSelectResult parses the result of a Select operation into the target slice.
-func (o *ovsdbClient) ParseSelectResult(result ovsdb.OperationResult, targetSlice interface{}) error {
-	if result.Error != "" {
-		details := ""
-		if result.Details != "" {
-			details = ": " + result.Details
-		}
-		return fmt.Errorf("select operation failed: %s%s", result.Error, details)
+// GetSelectResults parses the results of a transaction containing select operations
+// and populates the target slices. The targets map is keyed by the correlation ID
+// returned from the Select operation. The value is a pointer to a slice of models.
+func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, targets map[string]interface{}) error {
+	if len(ops) != len(results) {
+		return fmt.Errorf("number of operations (%d) and results (%d) must match", len(ops), len(results))
 	}
 
-	_, err := validateParseTargetSlice(targetSlice)
-	if err != nil {
-		return err // Already formatted
+	groupedResults := make(map[string][]ovsdb.OperationResult)
+	for i, op := range ops {
+		if op.Op == ovsdb.OperationSelect && op.CorrelationID != "" {
+			groupedResults[op.CorrelationID] = append(groupedResults[op.CorrelationID], results[i])
+		}
 	}
 
 	db := o.primaryDB()
 	db.modelMutex.RLock()
 	defer db.modelMutex.RUnlock()
 
-	if !db.model.Valid() {
-		return fmt.Errorf("database model for '%s' is not valid (client may not be connected or schema mismatch)", o.primaryDBName)
-	}
-
-	return mapSelectResultToSlice(result.Rows, targetSlice, db.model)
-}
-
-// validateParseTargetSlice validates the 'targetSlice' argument for ParseSelectResult.
-// It ensures 'targetSlice' is a non-nil pointer to a slice whose elements are
-// structs or pointers to structs that implement model.Model.
-// It returns the underlying struct type of the slice elements.
-func validateParseTargetSlice(targetSlice interface{}) (reflect.Type, error) {
-	targetVal := reflect.ValueOf(targetSlice)
-	if targetVal.Kind() != reflect.Ptr || targetVal.IsNil() {
-		return nil, errors.New("targetSlice argument must be a non-nil pointer to a slice of models")
-	}
-	sliceVal := targetVal.Elem()
-	if sliceVal.Kind() != reflect.Slice {
-		return nil, errors.New("targetSlice argument must be a pointer to a slice of models")
-	}
-	elemType := sliceVal.Type().Elem() // Get the type of the slice elements
-
-	var elemStructType reflect.Type
-	if elemType.Kind() == reflect.Struct {
-		elemStructType = elemType
-	} else if elemType.Kind() == reflect.Ptr {
-		elemStructType = elemType.Elem()
-		if elemStructType.Kind() != reflect.Struct {
-			return nil, errors.New("targetSlice elements must be structs or pointers to structs")
-		}
-	} else {
-		return nil, errors.New("targetSlice elements must be structs or pointers to structs")
-	}
-
-	// Ensure element type implements model.Model
-	modelInterfaceType := reflect.TypeOf((*model.Model)(nil)).Elem()
-	// Check if a pointer to the struct type implements the model interface
-	if !reflect.PointerTo(elemStructType).Implements(modelInterfaceType) {
-		return nil, fmt.Errorf("targetSlice element type %s does not implement model.Model", elemStructType.String())
-	}
-
-	return elemStructType, nil
-}
-
-// mapSelectResultToSlice maps OVSDB rows to the target slice.
-func mapSelectResultToSlice(rows []ovsdb.Row, targetSlice interface{}, dbModel model.DatabaseModel) error {
-	sliceVal := reflect.ValueOf(targetSlice).Elem() // We know targetSlice is ptr to slice from validation
-	modelType := sliceVal.Type().Elem()             // Original element type (struct or ptr)
-
-	numRows := len(rows)
-	newSlice := reflect.MakeSlice(sliceVal.Type(), numRows, numRows)
-
-	for i, row := range rows {
-		// Determine the struct type for creating a new instance
-		var structType reflect.Type
-		if modelType.Kind() == reflect.Ptr {
-			structType = modelType.Elem()
-		} else {
-			structType = modelType
-		}
-		// Create a new element - always create a pointer first
-		newModelPtr := reflect.New(structType)
-		newModelIntf := newModelPtr.Interface()
-
-		// We need ModelInfo based on the element's struct type for the mapper
-		// Ensure newModelIntf is model.Model before casting
-		modelInstance, ok := newModelIntf.(model.Model)
+	for id, targetSlice := range targets {
+		opResults, ok := groupedResults[id]
 		if !ok {
-			// This should not happen due to validateParseTargetSlice check in the caller, but good to be safe
-			return fmt.Errorf("internal error: element type %s does not implement model.Model", structType.String())
-		}
-		rowModelInfo, err := dbModel.NewModelInfo(modelInstance)
-		if err != nil {
-			return fmt.Errorf("failed to create model info for row %d type %s: %w", i, structType.String(), err)
+			// It's possible a correlation ID was provided for a non-select op
+			// or an op that didn't generate results. This is not an error.
+			continue
 		}
 
-		rowData := row // Capture row for the call
-		// GetRowData expects a pointer to the row map
-		if err := dbModel.Mapper.GetRowData(&rowData, rowModelInfo); err != nil {
-			return fmt.Errorf("failed to map row %d to model type %s: %w", i, structType.String(), err)
+		slicePtr := reflect.ValueOf(targetSlice)
+		if slicePtr.Type().Kind() != reflect.Ptr || slicePtr.IsNil() {
+			return &ErrWrongType{slicePtr.Type(), "target must be a non-nil pointer to a slice of models"}
 		}
 
-		// Assign the populated model to the slice
-		if modelType.Kind() == reflect.Ptr {
-			// Slice expects *modelType, assign the pointer we created
-			newSlice.Index(i).Set(newModelPtr)
+		sliceVal := reflect.Indirect(slicePtr)
+		if sliceVal.Type().Kind() != reflect.Slice {
+			return &ErrWrongType{slicePtr.Type(), "target must be a pointer to a slice of models"}
+		}
+
+		modelType := sliceVal.Type().Elem()
+		isPtr := modelType.Kind() == reflect.Ptr
+		if isPtr {
+			modelType = modelType.Elem()
+		}
+
+		// Create a map to store merged results for this correlation ID
+		mergedRows := make(map[string]reflect.Value)
+
+		for _, result := range opResults {
+			if result.Error != "" {
+				return fmt.Errorf("operation error for correlation ID %s: %s: %s", id, result.Error, result.Details)
+			}
+
+			for _, rowData := range result.Rows {
+				newModelVal := reflect.New(modelType)
+				newModel := newModelVal.Interface().(model.Model)
+
+				info, err := db.model.NewModelInfo(newModel)
+				if err != nil {
+					return fmt.Errorf("failed to get model info: %w", err)
+				}
+
+				if err := db.model.Mapper.GetRowData(&rowData, info); err != nil {
+					return fmt.Errorf("failed to convert row to model: %w", err)
+				}
+
+				uuid, err := info.FieldByColumn("_uuid")
+				if err != nil {
+					return fmt.Errorf("failed to get UUID from model: %w", err)
+				}
+				mergedRows[uuid.(string)] = newModelVal
+			}
+		}
+
+		// Populate the target slice
+		if sliceVal.IsNil() || sliceVal.Cap() == 0 {
+			sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), 0, len(mergedRows)))
 		} else {
-			// Slice expects modelType, assign the dereferenced pointer
-			newSlice.Index(i).Set(newModelPtr.Elem())
+			// Respect existing slice but reset length
+			sliceVal.SetLen(0)
+		}
+
+		for _, modelVal := range mergedRows {
+			if isPtr {
+				sliceVal.Set(reflect.Append(sliceVal, modelVal))
+			} else {
+				sliceVal.Set(reflect.Append(sliceVal, reflect.Indirect(modelVal)))
+			}
 		}
 	}
-
-	// Set Result Slice
-	sliceVal.Set(newSlice)
 	return nil
 }
