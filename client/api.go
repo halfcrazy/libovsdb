@@ -9,6 +9,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/ovn-kubernetes/libovsdb/cache"
+	"github.com/ovn-kubernetes/libovsdb/mapper"
 	"github.com/ovn-kubernetes/libovsdb/model"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
@@ -56,6 +57,9 @@ type API interface {
 	// the field associated with column "_uuid" has some content other than a
 	// UUID, it will be treated as named-uuid
 	Create(...model.Model) ([]ovsdb.Operation, error)
+
+	// SelectAll generates the OVSDB select operation based on the model type.
+	SelectAll(m model.Model, columns ...string) (ovsdb.Operation, error)
 }
 
 // ConditionalAPI is an interface used to perform operations that require / use Conditions
@@ -85,12 +89,6 @@ type ConditionalAPI interface {
 
 	// Select generates the OVSDB select operation based on the condition.
 	// It determines the target table and columns from the condition context.
-	// Returns an error if the condition was built using WhereCache.
-	// The correlation ID is handled internally and not exposed to the user.
-	//
-	// LIMITATION: Multiple Select operations for the same table within a single transaction are not supported.
-	// Each table can only have one Select operation per transaction. If you need to perform multiple
-	// selections on the same table, use separate transactions instead.
 	Select(columns ...string) ([]ovsdb.Operation, error)
 }
 
@@ -227,30 +225,12 @@ func (a api) conditionFromFunc(predicate any) Conditional {
 
 // conditionFromModels returns a Conditional from one or more models.
 func (a api) conditionFromModels(models []model.Model) Conditional {
-	tableName := ""
-	var err error
-	// If models is empty, this is a select all on a table to be determined
-	// by the operation that uses it, e.g: List()
-	if len(models) > 0 {
-		tableName, err = a.getTableFromModel(models[0])
-		if err != nil {
-			return newErrorConditional(err)
-		}
+	if len(models) == 0 {
+		return newErrorConditional(fmt.Errorf("at least one model required"))
 	}
-
-	// Check if it's a "select all" call: single zero-value model
-	if len(models) == 1 {
-		modelVal := reflect.ValueOf(models[0])
-		// Check if the underlying element (if pointer) or the value itself is zero
-		if modelVal.Kind() == reflect.Ptr {
-			if !modelVal.IsNil() && modelVal.Elem().IsZero() {
-				// select all case
-				models = []model.Model{}
-			}
-		} else if modelVal.IsZero() {
-			// Handle non-pointer struct case if models can be non-pointers
-			models = []model.Model{}
-		}
+	tableName, err := a.getTableFromModel(models[0])
+	if tableName == "" {
+		return newErrorConditional(err)
 	}
 
 	conditional, err := newEqualityConditional(tableName, a.cache, models)
@@ -668,21 +648,60 @@ func newConditionalAPI(cache *cache.TableCache, cond Conditional, logger *logr.L
 	}
 }
 
+// resolveSelectColumns determines and validates the columns to select for a given table.
+// It always includes _uuid and validates user-provided columns against the schema.
+func (a api) resolveSelectColumns(tableName string, userColumns []string) ([]string, error) {
+	if a.cache == nil || !a.cache.DatabaseModel().Valid() {
+		return nil, fmt.Errorf("database model/schema info not available for select")
+	}
+
+	dbModel := a.cache.DatabaseModel()
+	tableSchema := dbModel.Schema.Table(tableName)
+	if tableSchema == nil {
+		return nil, fmt.Errorf("internal error: could not find table schema for %s to determine columns", tableName)
+	}
+
+	// If no user columns specified, select all columns
+	if len(userColumns) == 0 {
+		columnsToSelect := make([]string, 0, len(tableSchema.Columns)+1)
+		columnsToSelect = append(columnsToSelect, "_uuid") // Always include UUID
+		for colName := range tableSchema.Columns {
+			if colName != "_uuid" { // Avoid adding twice if explicitly in schema
+				columnsToSelect = append(columnsToSelect, colName)
+			}
+		}
+		return columnsToSelect, nil
+	}
+
+	// Use user-provided columns, with validation
+	columnSet := make(map[string]struct{}, len(userColumns)+1)
+	columnsToSelect := make([]string, 0, len(userColumns)+1)
+
+	// Always include _uuid for model identification
+	columnsToSelect = append(columnsToSelect, "_uuid")
+	columnSet["_uuid"] = struct{}{}
+
+	for _, col := range userColumns {
+		if _, ok := tableSchema.Columns[col]; !ok && col != "_uuid" {
+			return nil, mapper.NewErrColumnNotFound(col, tableName)
+		}
+		if _, ok := columnSet[col]; !ok {
+			columnsToSelect = append(columnsToSelect, col)
+			columnSet[col] = struct{}{}
+		}
+	}
+
+	return columnsToSelect, nil
+}
+
 // Select generates the OVSDB select operation based on the conditions previously set
 // using Where, WhereAll, or WhereCache.
 // It determines the target table and columns from the condition context.
-// Returns an error if called after WhereCache.
 // If used with WhereAny, it will generate one select operation per condition.
-// The correlation ID is handled internally and not exposed to the user.
 func (a api) Select(columns ...string) ([]ovsdb.Operation, error) {
 	// Select now requires a condition to be set via WhereXxx first.
 	if a.cond == nil {
-		return nil, fmt.Errorf("Select called on API with no condition set (use Where, WhereAll, or WhereAny first)")
-	}
-
-	if _, ok := a.cond.(*predicateConditional); ok {
-		// Prevent select based on cache predicate function which cannot be translated
-		return nil, fmt.Errorf("cannot generate OVSDB select operation from a cache predicate function (WhereCache)")
+		return nil, fmt.Errorf("select called on API with no condition set (use WhereXxx first)")
 	}
 
 	// Get table name directly from the condition
@@ -697,34 +716,10 @@ func (a api) Select(columns ...string) ([]ovsdb.Operation, error) {
 		return nil, fmt.Errorf("failed to generate conditions for select: %w", err)
 	}
 
-	// Determine columns to select
-	if a.cache == nil || !a.cache.DatabaseModel().Valid() {
-		return nil, fmt.Errorf("database model/schema info not available for select")
-	}
-	dbModel := a.cache.DatabaseModel()
-	tableSchema := dbModel.Schema.Table(tableName)
-	if tableSchema == nil {
-		return nil, fmt.Errorf("internal error: could not find table schema for %s to determine columns", tableName)
-	}
-	var columnsToSelect []string
-	if len(columns) > 0 {
-		// Use user-provided columns, with validation
-		columnSet := make(map[string]struct{}, len(columns)+1)
-		columnsToSelect = make([]string, 0, len(columns)+1)
-
-		// Always include _uuid for model identification
-		columnsToSelect = append(columnsToSelect, "_uuid")
-		columnSet["_uuid"] = struct{}{}
-
-		for _, col := range columns {
-			if _, ok := tableSchema.Columns[col]; !ok && col != "_uuid" {
-				return nil, fmt.Errorf("column '%s' not found in table '%s'", col, tableName)
-			}
-			if _, ok := columnSet[col]; !ok {
-				columnsToSelect = append(columnsToSelect, col)
-				columnSet[col] = struct{}{}
-			}
-		}
+	// Determine columns to select using the common helper
+	columnsToSelect, err := a.resolveSelectColumns(tableName, columns)
+	if err != nil {
+		return nil, err
 	}
 
 	// If no conditions were generated (e.g. select all), create a single
@@ -747,4 +742,30 @@ func (a api) Select(columns ...string) ([]ovsdb.Operation, error) {
 	}
 
 	return operations, nil
+}
+
+// SelectAll generates the OVSDB select operation based on the model type.
+func (a api) SelectAll(m model.Model, columns ...string) (ovsdb.Operation, error) {
+	var op ovsdb.Operation
+	// Determine table from model
+	tableName, err := a.getTableFromModel(m)
+	if err != nil {
+		return op, err
+	}
+
+	// Determine columns to select using the common helper
+	columnsToSelect, err := a.resolveSelectColumns(tableName, columns)
+	if err != nil {
+		return op, err
+	}
+
+	correlationID := uuid.NewString()
+	return ovsdb.Operation{
+		Op:    ovsdb.OperationSelect,
+		Table: tableName,
+		// fetch all
+		Where:         []ovsdb.Condition{},
+		Columns:       columnsToSelect,
+		CorrelationID: correlationID,
+	}, nil
 }

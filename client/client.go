@@ -67,11 +67,8 @@ type Client interface {
 	API
 	// GetSelectResults parses the results of a transaction containing select operations
 	// and populates the target slice with all results. The target must be a pointer to a slice of models.
-	//
-	// LIMITATION: Multiple Select operations for the same table within a single transaction are not supported.
-	// Each table can only have one Select operation per transaction. If you need to perform multiple
-	// selections on the same table, use separate transactions instead.
-	GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target interface{}) error
+	// An optional index can be passed to get the N-th result of the same model.
+	GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target *[]model.Model, index *int) error
 }
 
 type bufferedUpdate struct {
@@ -1447,13 +1444,15 @@ func (o *ovsdbClient) WhereCache(predicate any) ConditionalAPI {
 	return o.primaryDB().api.WhereCache(predicate)
 }
 
+// SelectAll generates the OVSDB select operation based on the model type.
+func (o *ovsdbClient) SelectAll(m model.Model, columns ...string) (ovsdb.Operation, error) {
+	return o.primaryDB().api.SelectAll(m, columns...)
+}
+
 // GetSelectResults parses the results of a transaction containing select operations
 // and populates the target slice with all results. The target must be a pointer to a slice of models.
-//
-// LIMITATION: Multiple Select operations for the same table within a single transaction are not supported.
-// Each table can only have one Select operation per transaction. If you need to perform multiple
-// selections on the same table, use separate transactions instead.
-func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target interface{}) error {
+// An optional index can be passed to get the N-th result of the same model, if not specific use 0 as default.
+func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target *[]model.Model, index *int) error {
 	if len(ops) != len(results) {
 		return fmt.Errorf("number of operations (%d) and results (%d) must match", len(ops), len(results))
 	}
@@ -1539,20 +1538,26 @@ func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.Op
 		}
 	}
 
-	// Populate the target slice
-	if sliceVal.IsNil() || sliceVal.Cap() == 0 {
-		sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), 0, len(mergedRows)))
+	// Populate the target slice with optimized memory allocation
+	resultCount := len(mergedRows)
+
+	// Pre-allocate slice with exact capacity to avoid repeated allocations
+	if sliceVal.IsNil() || sliceVal.Cap() < resultCount {
+		sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), resultCount, resultCount))
 	} else {
-		// Respect existing slice but reset length
-		sliceVal.SetLen(0)
+		// Reuse existing slice but set to exact length
+		sliceVal.SetLen(resultCount)
 	}
 
+	// Use index-based assignment to avoid append overhead
+	i := 0
 	for _, modelVal := range mergedRows {
 		if isPtr {
-			sliceVal.Set(reflect.Append(sliceVal, modelVal))
+			sliceVal.Index(i).Set(modelVal)
 		} else {
-			sliceVal.Set(reflect.Append(sliceVal, reflect.Indirect(modelVal)))
+			sliceVal.Index(i).Set(reflect.Indirect(modelVal))
 		}
+		i++
 	}
 
 	return nil
