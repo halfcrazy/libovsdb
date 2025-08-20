@@ -65,10 +65,6 @@ type Client interface {
 	NewMonitor(...MonitorOption) *Monitor
 	CurrentEndpoint() string
 	API
-	// GetSelectResults parses the results of a transaction containing select operations
-	// and populates the target slice with all results. The target must be a pointer to a slice of models.
-	// An optional index can be passed to get the N-th result of the same model.
-	GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target *[]model.Model, index *int) error
 }
 
 type bufferedUpdate struct {
@@ -1450,45 +1446,63 @@ func (o *ovsdbClient) SelectAll(m model.Model, columns ...string) (ovsdb.Operati
 }
 
 // GetSelectResults parses the results of a transaction containing select operations
-// and populates the target slice with all results. The target must be a pointer to a slice of models.
-// An optional index can be passed to get the N-th result of the same model, if not specific use 0 as default.
-func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target *[]model.Model, index *int) error {
+// and populates the target slice with results. Uses generics to maintain type safety.
+//
+// Parameters:
+//   - client: The OVSDB client instance
+//   - ops: The operations that were sent to Transact
+//   - results: The results returned from Transact
+//   - target: A pointer to a slice of the specific model type T
+//   - index: If nil (default), returns the first query group's results (aggregated and deduplicated).
+//     If provided, returns the results from the N-th query group for the target table.
+//
+// The table name is automatically inferred from the generic type T.
+// Query groups are determined by correlation IDs - operations with the same correlation ID
+// (e.g., from a single WhereAny call) form one group.
+//
+// This allows handling multiple different queries for the same table in a single transaction,
+// such as:
+//
+//	ops1, _ := client.WhereAny(model, cond1, cond2).Select()  // Query group 0
+//	ops2, _ := client.Where(model, cond3).Select()            // Query group 1
+//	allOps := append(ops1, ops2...)
+//	results, _ := client.Transact(ctx, allOps...)
+//
+//	var bridges1 []*Bridge
+//	client.GetSelectResults(client, allOps, results, &bridges1, nil)     // Gets group 0 results
+//	var bridges2 []*Bridge
+//	idx := 1
+//	client.GetSelectResults(client, allOps, results, &bridges2, &idx)    // Gets group 1 results
+//
+//	// No type conversion needed - bridges1 and bridges2 are already []*Bridge!
+func GetSelectResults[T model.Model](client Client, ops []ovsdb.Operation, results []ovsdb.OperationResult, target *[]T, index *int) error {
 	if len(ops) != len(results) {
 		return fmt.Errorf("number of operations (%d) and results (%d) must match", len(ops), len(results))
 	}
 
 	// Validate target parameter
-	slicePtr := reflect.ValueOf(target)
-	if slicePtr.Type().Kind() != reflect.Ptr || slicePtr.IsNil() {
-		return &ErrWrongType{slicePtr.Type(), "target must be a non-nil pointer to a slice of models"}
+	if target == nil {
+		return fmt.Errorf("target cannot be nil")
 	}
 
-	sliceVal := reflect.Indirect(slicePtr)
-	if sliceVal.Type().Kind() != reflect.Slice {
-		return &ErrWrongType{slicePtr.Type(), "target must be a pointer to a slice of models"}
+	// Get database model from client
+	cache := client.Cache()
+	if cache == nil {
+		return fmt.Errorf("client cache is not available")
 	}
+	dbModel := cache.DatabaseModel()
 
-	modelType := sliceVal.Type().Elem()
-	isPtr := modelType.Kind() == reflect.Ptr
-	if isPtr {
-		modelType = modelType.Elem()
-	}
-
-	db := o.primaryDB()
-	db.modelMutex.RLock()
-	defer db.modelMutex.RUnlock()
-
-	// Determine the target table name from the model type
-	dummyModel := reflect.New(modelType).Interface().(model.Model)
-	info, err := db.model.NewModelInfo(dummyModel)
+	// Get table name from the generic type T
+	var dummy T
+	info, err := dbModel.NewModelInfo(dummy)
 	if err != nil {
-		return fmt.Errorf("failed to get model info for target type: %w", err)
+		return fmt.Errorf("failed to get model info for type %T: %w", dummy, err)
 	}
 	targetTable := info.Metadata.TableName
 
 	// Group select operations by correlation ID for the target table
 	targetTableOperations := make(map[string][]ovsdb.OperationResult) // correlation ID -> results
-	correlationIDOrder := make([]string, 0) // preserve order of correlation IDs
+	correlationIDOrder := make([]string, 0)                           // preserve order of correlation IDs
 
 	for i, op := range ops {
 		if op.Op == ovsdb.OperationSelect && op.Table == targetTable {
@@ -1510,7 +1524,7 @@ func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.Op
 	targetIndex := 0 // Default to first query group
 	if index != nil {
 		if *index < 0 || *index >= len(correlationIDOrder) {
-			return fmt.Errorf("index %d is out of range: found %d query groups for table '%s'", 
+			return fmt.Errorf("index %d is out of range: found %d query groups for table '%s'",
 				*index, len(correlationIDOrder), targetTable)
 		}
 		targetIndex = *index
@@ -1520,7 +1534,7 @@ func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.Op
 	selectedResults = targetTableOperations[selectedCorrelationID]
 
 	// Create a map to store merged results (deduplicated by UUID)
-	mergedRows := make(map[string]reflect.Value)
+	mergedModels := make(map[string]T)
 
 	for _, result := range selectedResults {
 		if result.Error != "" {
@@ -1528,15 +1542,18 @@ func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.Op
 		}
 
 		for _, rowData := range result.Rows {
-			newModelVal := reflect.New(modelType)
-			newModel := newModelVal.Interface().(model.Model)
+			// Create a new model instance for this table
+			newModel, err := dbModel.NewModel(targetTable)
+			if err != nil {
+				return fmt.Errorf("failed to create new model for table %s: %w", targetTable, err)
+			}
 
-			info, err := db.model.NewModelInfo(newModel)
+			info, err := dbModel.NewModelInfo(newModel)
 			if err != nil {
 				return fmt.Errorf("failed to get model info: %w", err)
 			}
 
-			if err := db.model.Mapper.GetRowData(&rowData, info); err != nil {
+			if err := dbModel.Mapper.GetRowData(&rowData, info); err != nil {
 				return fmt.Errorf("failed to convert row to model: %w", err)
 			}
 
@@ -1545,30 +1562,14 @@ func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.Op
 				return fmt.Errorf("failed to get UUID from model: %w", err)
 			}
 			// Deduplicate by UUID - later results overwrite earlier ones
-			mergedRows[uuid.(string)] = newModelVal
+			mergedModels[uuid.(string)] = newModel.(T)
 		}
 	}
 
-	// Populate the target slice with optimized memory allocation
-	resultCount := len(mergedRows)
-
-	// Pre-allocate slice with exact capacity to avoid repeated allocations
-	if sliceVal.IsNil() || sliceVal.Cap() < resultCount {
-		sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), resultCount, resultCount))
-	} else {
-		// Reuse existing slice but set to exact length
-		sliceVal.SetLen(resultCount)
-	}
-
-	// Use index-based assignment to avoid append overhead
-	i := 0
-	for _, modelVal := range mergedRows {
-		if isPtr {
-			sliceVal.Index(i).Set(modelVal)
-		} else {
-			sliceVal.Index(i).Set(reflect.Indirect(modelVal))
-		}
-		i++
+	// Populate the target slice
+	*target = make([]T, 0, len(mergedModels))
+	for _, model := range mergedModels {
+		*target = append(*target, model)
 	}
 
 	return nil

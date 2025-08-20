@@ -649,7 +649,8 @@ func newConditionalAPI(cache *cache.TableCache, cond Conditional, logger *logr.L
 }
 
 // resolveSelectColumns determines and validates the columns to select for a given table.
-// It always includes _uuid and validates user-provided columns against the schema.
+// Returns nil when no columns are specified (meaning select all columns per RFC 7047).
+// When columns are specified, always includes _uuid and validates user-provided columns against the schema.
 func (a api) resolveSelectColumns(tableName string, userColumns []string) ([]string, error) {
 	if a.cache == nil || !a.cache.DatabaseModel().Valid() {
 		return nil, fmt.Errorf("database model/schema info not available for select")
@@ -661,16 +662,9 @@ func (a api) resolveSelectColumns(tableName string, userColumns []string) ([]str
 		return nil, fmt.Errorf("internal error: could not find table schema for %s to determine columns", tableName)
 	}
 
-	// If no user columns specified, select all columns
+	// If no user columns specified, return nil to indicate "select all columns" per RFC 7047
 	if len(userColumns) == 0 {
-		columnsToSelect := make([]string, 0, len(tableSchema.Columns)+1)
-		columnsToSelect = append(columnsToSelect, "_uuid") // Always include UUID
-		for colName := range tableSchema.Columns {
-			if colName != "_uuid" { // Avoid adding twice if explicitly in schema
-				columnsToSelect = append(columnsToSelect, colName)
-			}
-		}
-		return columnsToSelect, nil
+		return nil, nil
 	}
 
 	// Use user-provided columns, with validation

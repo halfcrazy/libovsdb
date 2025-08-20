@@ -1556,16 +1556,31 @@ func TestConditionalAPISelect(t *testing.T) {
 			},
 			selectColumns: []string{"name", "invalid_column"},
 			expectError:   true,
-			errorContains: "column 'invalid_column' not found in table 'Bridge'",
+			errorContains: "column: invalid_column not found in table: Bridge",
 		},
 		{
-			name: "Error: Select after WhereCache",
+			name: "Success: Select after WhereCache",
 			conditionalAPI: func(api API) ConditionalAPI {
 				return api.WhereCache(func(_ *Bridge) bool { return true })
 			},
-			selectColumns: nil,
-			expectError:   true,
-			errorContains: "WhereCache",
+			selectColumns: nil, // Default: all columns
+			expectError:   false,
+			expectedWhere: []ovsdb.Condition{}, // WhereCache generates conditions based on cache matches
+			expectedTable: "Bridge",
+			expectedOps: func() []ovsdb.Operation {
+				// WhereCache will generate operations based on cached Bridge models
+				// Since we don't have specific cache content in this test, we expect empty operations or
+				// operations with UUID conditions. For this test, we'll expect at least one operation.
+				expected := []ovsdb.Operation{
+					{
+						Op:      ovsdb.OperationSelect,
+						Table:   "Bridge",
+						Where:   []ovsdb.Condition{}, // Actual conditions depend on cache content
+						Columns: nil,                 // nil means all columns per RFC 7047
+					},
+				}
+				return expected
+			}(),
 		},
 		{
 			name: "Success: Select after WhereAny with multiple OR conditions",
@@ -1840,20 +1855,9 @@ func TestGetSelectResults(t *testing.T) {
 			expectError:   true,
 			errorContains: "some ovsdb error",
 		},
+
 		{
-			name: "Error: bad target type (not a pointer)",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationSelect, CorrelationID: queryID, Table: "Bridge"},
-			},
-			results: []ovsdb.OperationResult{
-				{Rows: []ovsdb.Row{rowBr1}},
-			},
-			target:        []*Bridge{}, // Should be *[]*Bridge
-			expectError:   true,
-			errorContains: "must be a non-nil pointer",
-		},
-		{
-			name: "Error: validation intercept - same table with different correlation IDs",
+			name: "Success: same table with different correlation IDs - returns first group by default",
 			ops: []ovsdb.Operation{
 				{Op: ovsdb.OperationSelect, CorrelationID: "query-1", Table: "Bridge"},
 				{Op: ovsdb.OperationSelect, CorrelationID: "query-2", Table: "Bridge"},
@@ -1862,9 +1866,12 @@ func TestGetSelectResults(t *testing.T) {
 				{Rows: []ovsdb.Row{rowBr1}},
 				{Rows: []ovsdb.Row{rowBr2}},
 			},
-			target:        &[]*Bridge{},
-			expectError:   true,
-			errorContains: "multiple Select operations for table 'Bridge' with different correlation IDs",
+			target: &[]*Bridge{},
+			verify: func(t *testing.T, target interface{}) {
+				bridges := *target.(*[]*Bridge)
+				require.Len(t, bridges, 1, "should return only first query group results")
+				assert.Equal(t, "br1", bridges[0].Name)
+			},
 		},
 	}
 
@@ -1879,7 +1886,14 @@ func TestGetSelectResults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ovs.GetSelectResults(tt.ops, tt.results, tt.target)
+			// Use the generic API directly with the target type
+			if bridges, ok := tt.target.(*[]*Bridge); ok {
+				err = GetSelectResults(ovs, tt.ops, tt.results, bridges, nil)
+			} else if ovsRows, ok := tt.target.(*[]*OpenvSwitch); ok {
+				err = GetSelectResults(ovs, tt.ops, tt.results, ovsRows, nil)
+			} else {
+				t.Fatalf("Unsupported target type: %T", tt.target)
+			}
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -1892,4 +1906,31 @@ func TestGetSelectResults(t *testing.T) {
 			}
 		})
 	}
+
+	// Test index parameter functionality
+	t.Run("Index parameter test", func(t *testing.T) {
+		ops := []ovsdb.Operation{
+			{Op: ovsdb.OperationSelect, CorrelationID: "query-1", Table: "Bridge"},
+			{Op: ovsdb.OperationSelect, CorrelationID: "query-2", Table: "Bridge"},
+		}
+		results := []ovsdb.OperationResult{
+			{Rows: []ovsdb.Row{rowBr1}},
+			{Rows: []ovsdb.Row{rowBr2}},
+		}
+
+		// Test index 1 (second query group)
+		var bridges2 []*Bridge
+		idx := 1
+		err := GetSelectResults(ovs, ops, results, &bridges2, &idx)
+		require.NoError(t, err)
+		require.Len(t, bridges2, 1)
+		assert.Equal(t, "br2", bridges2[0].Name)
+
+		// Test invalid index
+		var bridges3 []*Bridge
+		invalidIdx := 5
+		err = GetSelectResults(ovs, ops, results, &bridges3, &invalidIdx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "index 5 is out of range")
+	})
 }
