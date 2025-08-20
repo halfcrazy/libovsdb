@@ -1449,7 +1449,7 @@ func (o *ovsdbClient) SelectAll(m model.Model, columns ...string) (ovsdb.Operati
 // and populates the target slice with results. Uses generics to maintain type safety.
 //
 // Parameters:
-//   - client: The OVSDB client instance
+//   - dbModel: The database model for creating and populating model instances
 //   - ops: The operations that were sent to Transact
 //   - results: The results returned from Transact
 //   - target: A pointer to a slice of the specific model type T
@@ -1469,13 +1469,13 @@ func (o *ovsdbClient) SelectAll(m model.Model, columns ...string) (ovsdb.Operati
 //	results, _ := client.Transact(ctx, allOps...)
 //
 //	var bridges1 []*Bridge
-//	client.GetSelectResults(client, allOps, results, &bridges1, nil)     // Gets group 0 results
+//	GetSelectResults(client.Cache().DatabaseModel(), allOps, results, &bridges1, nil)     // Gets group 0 results
 //	var bridges2 []*Bridge
 //	idx := 1
-//	client.GetSelectResults(client, allOps, results, &bridges2, &idx)    // Gets group 1 results
+//	GetSelectResults(client.Cache().DatabaseModel(), allOps, results, &bridges2, &idx)    // Gets group 1 results
 //
 //	// No type conversion needed - bridges1 and bridges2 are already []*Bridge!
-func GetSelectResults[T model.Model](client Client, ops []ovsdb.Operation, results []ovsdb.OperationResult, target *[]T, index *int) error {
+func GetSelectResults[T model.Model](dbModel model.DatabaseModel, ops []ovsdb.Operation, results []ovsdb.OperationResult, target *[]T, index *int) error {
 	if len(ops) != len(results) {
 		return fmt.Errorf("number of operations (%d) and results (%d) must match", len(ops), len(results))
 	}
@@ -1484,13 +1484,6 @@ func GetSelectResults[T model.Model](client Client, ops []ovsdb.Operation, resul
 	if target == nil {
 		return fmt.Errorf("target cannot be nil")
 	}
-
-	// Get database model from client
-	cache := client.Cache()
-	if cache == nil {
-		return fmt.Errorf("client cache is not available")
-	}
-	dbModel := cache.DatabaseModel()
 
 	// Get table name from the generic type T
 	var dummy T
@@ -1566,10 +1559,14 @@ func GetSelectResults[T model.Model](client Client, ops []ovsdb.Operation, resul
 		}
 	}
 
-	// Populate the target slice
-	*target = make([]T, 0, len(mergedModels))
-	for _, model := range mergedModels {
-		*target = append(*target, model)
+	// Populate the target slice with optimized index-based assignment
+	resultCount := len(mergedModels)
+	*target = make([]T, resultCount)
+
+	i := 0
+	for _, m := range mergedModels {
+		(*target)[i] = m
+		i++
 	}
 
 	return nil

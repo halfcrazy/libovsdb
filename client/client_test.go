@@ -1887,10 +1887,11 @@ func TestGetSelectResults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Use the generic API directly with the target type
+			dbModel := ovs.Cache().DatabaseModel()
 			if bridges, ok := tt.target.(*[]*Bridge); ok {
-				err = GetSelectResults(ovs, tt.ops, tt.results, bridges, nil)
+				err = GetSelectResults(dbModel, tt.ops, tt.results, bridges, nil)
 			} else if ovsRows, ok := tt.target.(*[]*OpenvSwitch); ok {
-				err = GetSelectResults(ovs, tt.ops, tt.results, ovsRows, nil)
+				err = GetSelectResults(dbModel, tt.ops, tt.results, ovsRows, nil)
 			} else {
 				t.Fatalf("Unsupported target type: %T", tt.target)
 			}
@@ -1921,7 +1922,8 @@ func TestGetSelectResults(t *testing.T) {
 		// Test index 1 (second query group)
 		var bridges2 []*Bridge
 		idx := 1
-		err := GetSelectResults(ovs, ops, results, &bridges2, &idx)
+		dbModel := ovs.Cache().DatabaseModel()
+		err := GetSelectResults(dbModel, ops, results, &bridges2, &idx)
 		require.NoError(t, err)
 		require.Len(t, bridges2, 1)
 		assert.Equal(t, "br2", bridges2[0].Name)
@@ -1929,7 +1931,7 @@ func TestGetSelectResults(t *testing.T) {
 		// Test invalid index
 		var bridges3 []*Bridge
 		invalidIdx := 5
-		err = GetSelectResults(ovs, ops, results, &bridges3, &invalidIdx)
+		err = GetSelectResults(dbModel, ops, results, &bridges3, &invalidIdx)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "index 5 is out of range")
 	})
