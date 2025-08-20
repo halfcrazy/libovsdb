@@ -1486,32 +1486,43 @@ func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.Op
 	}
 	targetTable := info.Metadata.TableName
 
-	// Validate and collect select operation results only for the target table
-	var selectResults []ovsdb.OperationResult
-	tableCorrelationIDs := make(map[string]string) // table -> correlation ID
+	// Group select operations by correlation ID for the target table
+	targetTableOperations := make(map[string][]ovsdb.OperationResult) // correlation ID -> results
+	correlationIDOrder := make([]string, 0) // preserve order of correlation IDs
 
 	for i, op := range ops {
-		if op.Op == ovsdb.OperationSelect {
-			if existingCorrelationID, exists := tableCorrelationIDs[op.Table]; exists {
-				if existingCorrelationID != op.CorrelationID {
-					return fmt.Errorf("multiple Select operations for table '%s' with different correlation IDs ('%s' vs '%s') are not supported in a single transaction. Consider using separate transactions instead",
-						op.Table, existingCorrelationID, op.CorrelationID)
-				}
-			} else {
-				tableCorrelationIDs[op.Table] = op.CorrelationID
+		if op.Op == ovsdb.OperationSelect && op.Table == targetTable {
+			if _, exists := targetTableOperations[op.CorrelationID]; !exists {
+				correlationIDOrder = append(correlationIDOrder, op.CorrelationID)
+				targetTableOperations[op.CorrelationID] = make([]ovsdb.OperationResult, 0)
 			}
-
-			// Only collect results for the target table
-			if op.Table == targetTable {
-				selectResults = append(selectResults, results[i])
-			}
+			targetTableOperations[op.CorrelationID] = append(targetTableOperations[op.CorrelationID], results[i])
 		}
 	}
+
+	// Determine which query group to use
+	var selectedResults []ovsdb.OperationResult
+	if len(correlationIDOrder) == 0 {
+		// No select operations found for the target table
+		return nil
+	}
+
+	targetIndex := 0 // Default to first query group
+	if index != nil {
+		if *index < 0 || *index >= len(correlationIDOrder) {
+			return fmt.Errorf("index %d is out of range: found %d query groups for table '%s'", 
+				*index, len(correlationIDOrder), targetTable)
+		}
+		targetIndex = *index
+	}
+
+	selectedCorrelationID := correlationIDOrder[targetIndex]
+	selectedResults = targetTableOperations[selectedCorrelationID]
 
 	// Create a map to store merged results (deduplicated by UUID)
 	mergedRows := make(map[string]reflect.Value)
 
-	for _, result := range selectResults {
+	for _, result := range selectedResults {
 		if result.Error != "" {
 			return fmt.Errorf("operation error: %s: %s", result.Error, result.Details)
 		}
