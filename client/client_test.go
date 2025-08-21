@@ -1337,6 +1337,28 @@ func TestConditionalAPISelect(t *testing.T) {
 	require.NoError(t, err, "Failed to connect OVSDB client for Open_vSwitch")
 	defer ovsClientForDefDB.Close()
 
+	tableCache := ovsClientForDefDB.Cache()
+	// Create some test bridges and add them to cache
+	cacheBridge1 := &Bridge{
+		UUID:         "cache-bridge-uuid-1",
+		Name:         "cache-br-1",
+		DatapathType: "system",
+	}
+	cacheBridge2 := &Bridge{
+		UUID:         "cache-bridge-uuid-2",
+		Name:         "cache-br-2",
+		DatapathType: "netdev",
+	}
+	cacheBridge3 := &Bridge{
+		UUID:         "cache-bridge-uuid-3",
+		Name:         "other-bridge", // This one won't match the WhereCache filter
+		DatapathType: "system",
+	}
+	bridgeTable := tableCache.Table("Bridge")
+	require.NoError(t, bridgeTable.Create("cache-bridge-uuid-1", cacheBridge1, false))
+	require.NoError(t, bridgeTable.Create("cache-bridge-uuid-2", cacheBridge2, false))
+	require.NoError(t, bridgeTable.Create("cache-bridge-uuid-3", cacheBridge3, false))
+
 	bridgeModel := &Bridge{Name: "br-selcond"}
 	bridgeModelCtx := &Bridge{} // Context model for WhereAll/WhereAny
 
@@ -1401,20 +1423,20 @@ func TestConditionalAPISelect(t *testing.T) {
 			conditionalAPI: func(api API) ConditionalAPI {
 				return api.WhereAll(bridgeModelCtx, model.Condition{
 					Field:    &bridgeModelCtx.Name,
-					Function: ovsdb.ConditionNotEqual,
+					Function: ovsdb.ConditionEqual,
 					Value:    "some-other-bridge",
 				})
 			},
 			selectColumns: nil, // Default: all columns
 			expectError:   false,
-			expectedWhere: []ovsdb.Condition{{Column: "name", Function: ovsdb.ConditionNotEqual, Value: "some-other-bridge"}},
+			expectedWhere: []ovsdb.Condition{{Column: "name", Function: ovsdb.ConditionEqual, Value: "some-other-bridge"}},
 			expectedTable: "Bridge",
 			expectedOps: func() []ovsdb.Operation {
 				expected := []ovsdb.Operation{
 					{
 						Op:      ovsdb.OperationSelect,
 						Table:   "Bridge",
-						Where:   []ovsdb.Condition{ovsdb.NewCondition("name", ovsdb.ConditionNotEqual, "some-other-bridge")},
+						Where:   []ovsdb.Condition{ovsdb.NewCondition("name", ovsdb.ConditionEqual, "some-other-bridge")},
 						Columns: nil, // nil means all columns per RFC 7047
 					},
 				}
@@ -1426,20 +1448,20 @@ func TestConditionalAPISelect(t *testing.T) {
 			conditionalAPI: func(api API) ConditionalAPI {
 				return api.WhereAll(bridgeModelCtx, model.Condition{
 					Field:    &bridgeModelCtx.Name,
-					Function: ovsdb.ConditionNotEqual,
+					Function: ovsdb.ConditionEqual,
 					Value:    "some-other-bridge",
 				})
 			},
 			selectColumns: []string{"name"},
 			expectError:   false,
-			expectedWhere: []ovsdb.Condition{{Column: "name", Function: ovsdb.ConditionNotEqual, Value: "some-other-bridge"}},
+			expectedWhere: []ovsdb.Condition{{Column: "name", Function: ovsdb.ConditionEqual, Value: "some-other-bridge"}},
 			expectedTable: "Bridge",
 			expectedOps: func() []ovsdb.Operation {
 				expected := []ovsdb.Operation{
 					{
 						Op:      ovsdb.OperationSelect,
 						Table:   "Bridge",
-						Where:   []ovsdb.Condition{ovsdb.NewCondition("name", ovsdb.ConditionNotEqual, "some-other-bridge")},
+						Where:   []ovsdb.Condition{ovsdb.NewCondition("name", ovsdb.ConditionEqual, "some-other-bridge")},
 						Columns: []string{"_uuid", "name"}, // Always includes _uuid
 					},
 				}
@@ -1559,9 +1581,12 @@ func TestConditionalAPISelect(t *testing.T) {
 			errorContains: "column: invalid_column not found in table: Bridge",
 		},
 		{
-			name: "Success: Select after WhereCache",
+			name: "Select after WhereCache",
 			conditionalAPI: func(api API) ConditionalAPI {
-				return api.WhereCache(func(_ *Bridge) bool { return true })
+				return api.WhereCache(func(br *Bridge) bool {
+					// Filter for bridges with names starting with "cache-br"
+					return strings.HasPrefix(br.Name, "cache-br")
+				})
 			},
 			selectColumns: nil, // Default: all columns
 			expectError:   false,
@@ -1569,21 +1594,26 @@ func TestConditionalAPISelect(t *testing.T) {
 			expectedTable: "Bridge",
 			expectedOps: func() []ovsdb.Operation {
 				// WhereCache will generate operations based on cached Bridge models
-				// Since we don't have specific cache content in this test, we expect empty operations or
-				// operations with UUID conditions. For this test, we'll expect at least one operation.
+				// We expect operations with UUID conditions for each matching bridge in cache
 				expected := []ovsdb.Operation{
 					{
 						Op:      ovsdb.OperationSelect,
 						Table:   "Bridge",
-						Where:   []ovsdb.Condition{}, // Actual conditions depend on cache content
-						Columns: nil,                 // nil means all columns per RFC 7047
+						Where:   []ovsdb.Condition{ovsdb.NewCondition("_uuid", ovsdb.ConditionEqual, ovsdb.UUID{GoUUID: "cache-bridge-uuid-1"})},
+						Columns: nil, // nil means all columns per RFC 7047
+					},
+					{
+						Op:      ovsdb.OperationSelect,
+						Table:   "Bridge",
+						Where:   []ovsdb.Condition{ovsdb.NewCondition("_uuid", ovsdb.ConditionEqual, ovsdb.UUID{GoUUID: "cache-bridge-uuid-2"})},
+						Columns: nil, // nil means all columns per RFC 7047
 					},
 				}
 				return expected
 			}(),
 		},
 		{
-			name: "Success: Select after WhereAny with multiple OR conditions",
+			name: "Select after WhereAny with multiple OR conditions",
 			conditionalAPI: func(api API) ConditionalAPI {
 				return api.WhereAny(bridgeModelCtx,
 					model.Condition{Field: &bridgeModelCtx.Name, Function: ovsdb.ConditionEqual, Value: "a"},
@@ -1657,6 +1687,13 @@ func TestConditionalAPISelect(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.Len(t, ops, len(tt.expectedOps), "Select should return %d operation", len(tt.expectedOps))
+				if strings.Contains(tt.name, "WhereCache") {
+					// we can not control map access order
+					// sort ops by uuid
+					sort.Slice(ops, func(i, j int) bool {
+						return ops[i].Where[0].Value.(ovsdb.UUID).GoUUID < ops[j].Where[0].Value.(ovsdb.UUID).GoUUID
+					})
+				}
 				for i, op := range ops {
 					assert.Equal(t, tt.expectedOps[i].Op, op.Op)
 					assert.Equal(t, tt.expectedOps[i].Table, op.Table)
