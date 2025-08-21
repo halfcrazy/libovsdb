@@ -1546,7 +1546,7 @@ func GetSelectResults[T model.Model](dbModel model.DatabaseModel, ops []ovsdb.Op
 				return fmt.Errorf("failed to get model info: %w", err)
 			}
 
-			if err := dbModel.Mapper.GetRowData(&rowData, info); err != nil {
+			if err := dbModel.Mapper.GetRowDataWithUUID(&rowData, info); err != nil {
 				return fmt.Errorf("failed to convert row to model: %w", err)
 			}
 
