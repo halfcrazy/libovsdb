@@ -58,8 +58,8 @@ type API interface {
 	// UUID, it will be treated as named-uuid
 	Create(...model.Model) ([]ovsdb.Operation, error)
 
-	// SelectAll generates the OVSDB select operation based on the model type.
-	SelectAll(m model.Model, columns ...string) (ovsdb.Operation, error)
+	// Select generates the OVSDB select operation based on the model type.
+	Select(m model.Model, columns ...string) ([]ovsdb.Operation, error)
 }
 
 // ConditionalAPI is an interface used to perform operations that require / use Conditions
@@ -89,7 +89,7 @@ type ConditionalAPI interface {
 
 	// Select generates the OVSDB select operation based on the condition.
 	// It determines the target table and columns from the condition context.
-	Select(columns ...string) ([]ovsdb.Operation, error)
+	Select(m model.Model, columns ...string) ([]ovsdb.Operation, error)
 }
 
 // ErrWrongType is used to report the user provided parameter has the wrong type
@@ -689,25 +689,14 @@ func (a api) resolveSelectColumns(tableName string, userColumns []string) ([]str
 }
 
 // Select generates the OVSDB select operation based on the conditions previously set
-// using Where, WhereAll, or WhereCache.
+// using Where, WhereAll, or WhereCache. Or directly used to select all without filter.
 // It determines the target table and columns from the condition context.
 // If used with WhereAny, it will generate one select operation per condition.
-func (a api) Select(columns ...string) ([]ovsdb.Operation, error) {
-	// Select now requires a condition to be set via WhereXxx first.
-	if a.cond == nil {
-		return nil, fmt.Errorf("select called on API with no condition set (use WhereXxx first)")
-	}
-
-	// Get table name directly from the condition
-	tableName := a.cond.Table()
-	if tableName == "" {
-		// This might happen with errorConditional or uninitialized conditions
-		return nil, fmt.Errorf("cannot determine table name from the condition for Select")
-	}
-
-	ovsdbConditionsList, err := a.cond.Generate()
+func (a api) Select(m model.Model, columns ...string) ([]ovsdb.Operation, error) {
+	// Determine table from model
+	tableName, err := a.getTableFromModel(m)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate conditions for select: %w", err)
+		return nil, err
 	}
 
 	// Determine columns to select using the common helper
@@ -716,10 +705,34 @@ func (a api) Select(columns ...string) ([]ovsdb.Operation, error) {
 		return nil, err
 	}
 
-	// If no conditions were generated (e.g. select all), create a single
-	// operation with an empty where clause which selects all rows.
-	if len(ovsdbConditionsList) == 0 {
-		ovsdbConditionsList = append(ovsdbConditionsList, []ovsdb.Condition{})
+	// Select without filter
+	if a.cond == nil {
+		correlationID := uuid.NewString()
+		op := ovsdb.Operation{
+			Op:    ovsdb.OperationSelect,
+			Table: tableName,
+			// fetch all
+			Where:   []ovsdb.Condition{},
+			Columns: columnsToSelect,
+		}
+		ovsdb.SetCorrelationID(&op, correlationID)
+		return []ovsdb.Operation{op}, nil
+	}
+
+	// Get table name directly from the condition
+	tableNameFromCond := a.cond.Table()
+	if tableNameFromCond == "" {
+		// This might happen with errorConditional or uninitialized conditions
+		return nil, fmt.Errorf("cannot determine table name from the condition for Select")
+	}
+	if tableName != tableNameFromCond {
+		return nil, &ErrWrongType{reflect.ValueOf(m).Type(),
+			fmt.Sprintf("Table derived from input type (%s) does not match Table from Condition (%s)", tableName, tableNameFromCond)}
+	}
+
+	ovsdbConditionsList, err := a.cond.Generate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate conditions for select: %w", err)
 	}
 
 	correlationID := uuid.NewString()
@@ -736,31 +749,4 @@ func (a api) Select(columns ...string) ([]ovsdb.Operation, error) {
 	}
 
 	return operations, nil
-}
-
-// SelectAll generates the OVSDB select operation based on the model type.
-func (a api) SelectAll(m model.Model, columns ...string) (ovsdb.Operation, error) {
-	var op ovsdb.Operation
-	// Determine table from model
-	tableName, err := a.getTableFromModel(m)
-	if err != nil {
-		return op, err
-	}
-
-	// Determine columns to select using the common helper
-	columnsToSelect, err := a.resolveSelectColumns(tableName, columns)
-	if err != nil {
-		return op, err
-	}
-
-	correlationID := uuid.NewString()
-	op = ovsdb.Operation{
-		Op:    ovsdb.OperationSelect,
-		Table: tableName,
-		// fetch all
-		Where:   []ovsdb.Condition{},
-		Columns: columnsToSelect,
-	}
-	ovsdb.SetCorrelationID(&op, correlationID)
-	return op, nil
 }

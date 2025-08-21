@@ -1676,7 +1676,7 @@ func TestConditionalAPISelect(t *testing.T) {
 
 			// For other cases, use the conditionalAPI function
 			condAPI := tt.conditionalAPI(ovsClientForDefDB)
-			ops, err = condAPI.Select(tt.selectColumns...)
+			ops, err = condAPI.Select(bridgeModel, tt.selectColumns...)
 
 			if tt.expectError {
 				require.Error(t, err)

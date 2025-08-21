@@ -1733,8 +1733,8 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 	// Use the client *without* monitors for Select tests
 	selectClient := suite.clientWithInactivityCheck
 
-	// 1. Generate Select operation (Select all - use Where().Select())
-	selectOpInitial, err := selectClient.Where(&bridgeModelInstance).Select()
+	// 1. Generate Select operation (Select all - use API.Select())
+	selectOpInitial, err := selectClient.Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate initial select op")
 	// 2. Transact
 	replyInitial, err := selectClient.Transact(ctx, selectOpInitial...)
@@ -1765,7 +1765,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 
 	// Test Select without conditions (using new API)
 	var bridges []bridgeType
-	selectOpAllPostCreate, err := selectClient.Where(&bridgeModelInstance).Select()
+	selectOpAllPostCreate, err := selectClient.Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate select all post-create op")
 	replyAllPostCreate, err := selectClient.Transact(ctx, selectOpAllPostCreate...)
 	suite.Require().NoError(err, "Transact failed for select all post-create")
@@ -1782,7 +1782,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 		Function: ovsdb.ConditionEqual,
 		Value:    bridgeName2,
 	}}
-	selectOpSpecific, err := selectClient.WhereAll(&bridgeModelInstance, modelConditions...).Select()
+	selectOpSpecific, err := selectClient.WhereAll(&bridgeModelInstance, modelConditions...).Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate select specific op")
 	replySpecific, err := selectClient.Transact(ctx, selectOpSpecific...)
 	suite.Require().NoError(err, "Transact failed for select specific")
@@ -1808,7 +1808,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 			Value:    map[string]string{"type": "main"},
 		},
 	}
-	selectOpMulti, err := selectClient.WhereAll(&bridgeModelInstance, multiConditions...).Select()
+	selectOpMulti, err := selectClient.WhereAll(&bridgeModelInstance, multiConditions...).Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate multi-condition select op")
 	replyMulti, err := selectClient.Transact(ctx, selectOpMulti...)
 	suite.Require().NoError(err, "Transact failed for multi-condition select")
@@ -1824,7 +1824,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 
 	// ===== Test Select with Specific Columns =====
 	var partialBridgeResult []bridgeType
-	selectOpPartial, err := selectClient.WhereAll(&bridgeModelInstance, multiConditions...).Select("name", "ports")
+	selectOpPartial, err := selectClient.WhereAll(&bridgeModelInstance, multiConditions...).Select(&bridgeModelInstance, "name", "ports")
 	suite.Require().NoError(err, "Failed to generate partial select op")
 	replyPartial, err := selectClient.Transact(ctx, selectOpPartial...)
 	suite.Require().NoError(err, "Transact failed for partial select")
@@ -1843,7 +1843,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 	suite.Require().Nil(partialBridgeResult[0].FailMode, "Partial select bridge should have nil BridgeFailMode")
 
 	// ===== Test Select with Invalid Column =====
-	_, err = selectClient.Where(&bridgeModelInstance).Select("name", "this_is_not_a_real_column")
+	_, err = selectClient.Where(&bridgeModelInstance).Select(&bridgeModelInstance, "name", "this_is_not_a_real_column")
 	suite.Require().Error(err, "Select with invalid column should return an error")
 	suite.Require().Contains(err.Error(), "column 'this_is_not_a_real_column' not found", "Error message for invalid column is incorrect")
 
@@ -1855,7 +1855,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 	ovsRows := []*ovsType{}
 	// Use Select on selectClient to fetch the OVS row directly, avoiding cache dependency
 	// 1. Generate Select op for Open_vSwitch table
-	selectOvsOp, err := selectClient.Where(&ovsType{}).Select() // Select all rows (should be only one)
+	selectOvsOp, err := selectClient.Select(&ovsType{}) // Select all rows (should be only one)
 	suite.Require().NoError(err, "Failed to generate select op for OVS row")
 	// 2. Transact
 	replyOvs, err := selectClient.Transact(ctx, selectOvsOp...)
@@ -1888,8 +1888,8 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 
 	// Select all again, should have br-sel2 and br-sel3 (uuid3)
 	var bridgesAfterDelete []bridgeType
-	// Generate Select operation (Select all - use Where().Select())
-	selectOpAfterDelete, err := selectClient.Where(&bridgeModelInstance).Select()
+	// Generate Select operation (Select all - use API.Select())
+	selectOpAfterDelete, err := selectClient.Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate select all after delete op")
 	replyAfterDelete, err := selectClient.Transact(ctx, selectOpAfterDelete...)
 	suite.Require().NoError(err, "Transact failed for select all after delete")
@@ -1923,7 +1923,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 		Function: ovsdb.ConditionEqual,
 		Value:    uuid1,
 	}}
-	selectOpDeleted, err := selectClient.WhereAll(&bridgeModelInstance, condDeleted...).Select()
+	selectOpDeleted, err := selectClient.WhereAll(&bridgeModelInstance, condDeleted...).Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate select deleted op")
 	replyDeleted, err := selectClient.Transact(ctx, selectOpDeleted...)
 	suite.Require().NoError(err, "Transact failed for select deleted")
@@ -1940,7 +1940,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 		Function: ovsdb.ConditionEqual,
 		Value:    bridgeName2,
 	}}
-	selectOpRemaining, err := selectClient.WhereAll(&bridgeModelInstance, condRemaining...).Select()
+	selectOpRemaining, err := selectClient.WhereAll(&bridgeModelInstance, condRemaining...).Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate select remaining op")
 	replyRemaining, err := selectClient.Transact(ctx, selectOpRemaining...)
 	suite.Require().NoError(err, "Transact failed for select remaining")
@@ -1966,7 +1966,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 			Value:    map[string]string{"owner": "test"},
 		},
 	}
-	selectOpOtherRemaining, err := selectClient.WhereAll(&bridgeModelInstance, condOtherRemaining...).Select()
+	selectOpOtherRemaining, err := selectClient.WhereAll(&bridgeModelInstance, condOtherRemaining...).Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate select other remaining op")
 	replyOtherRemaining, err := selectClient.Transact(ctx, selectOpOtherRemaining...)
 	suite.Require().NoError(err, "Transact failed for select other remaining")
@@ -1992,7 +1992,7 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 			Value:    bridgeName2,
 		},
 	}
-	selectOpWhereAny, err := selectClient.WhereAny(&bridgeModelInstance, condWhereAny...).Select()
+	selectOpWhereAny, err := selectClient.WhereAny(&bridgeModelInstance, condWhereAny...).Select(&bridgeModelInstance)
 	suite.Require().NoError(err, "Failed to generate select where any op")
 	replyWhereAny, err := selectClient.Transact(ctx, selectOpWhereAny...)
 	suite.Require().NoError(err, "Transact failed for select where any")
@@ -2006,10 +2006,10 @@ func (suite *OVSIntegrationSuite) TestSelectIntegrity() {
 	var multiSelectBridges []bridgeType
 	var multiSelectOvs []ovsType
 
-	selectOpBridges, err := selectClient.Where(&bridgeType{}).Select()
+	selectOpBridges, err := selectClient.Select(&bridgeType{})
 	suite.Require().NoError(err, "Failed to generate multi-select bridge op")
 
-	selectOpOvs, err := selectClient.Where(&ovsType{}).Select()
+	selectOpOvs, err := selectClient.Select(&ovsType{})
 	suite.Require().NoError(err, "Failed to generate multi-select ovs op")
 
 	allOps := append(selectOpBridges, selectOpOvs...)

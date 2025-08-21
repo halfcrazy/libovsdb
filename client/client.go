@@ -1440,9 +1440,9 @@ func (o *ovsdbClient) WhereCache(predicate any) ConditionalAPI {
 	return o.primaryDB().api.WhereCache(predicate)
 }
 
-// SelectAll generates the OVSDB select operation based on the model type.
-func (o *ovsdbClient) SelectAll(m model.Model, columns ...string) (ovsdb.Operation, error) {
-	return o.primaryDB().api.SelectAll(m, columns...)
+// SelectAll generates the OVSDB select operations
+func (o *ovsdbClient) Select(m model.Model, columns ...string) ([]ovsdb.Operation, error) {
+	return o.primaryDB().api.Select(m, columns...)
 }
 
 // GetSelectResults parses the results of a transaction containing select operations
