@@ -1758,7 +1758,7 @@ func TestGetSelectResults(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		ops           []ovsdb.Operation
+		ops           func() []ovsdb.Operation
 		results       []ovsdb.OperationResult
 		target        interface{}
 		verify        func(t *testing.T, target interface{})
@@ -1767,8 +1767,10 @@ func TestGetSelectResults(t *testing.T) {
 	}{
 		{
 			name: "Single select operation with multiple results",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationSelect, CorrelationID: queryID, Table: "Bridge"},
+			ops: func() []ovsdb.Operation {
+				op := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op, queryID)
+				return []ovsdb.Operation{op}
 			},
 			results: []ovsdb.OperationResult{
 				{Rows: []ovsdb.Row{rowBr1, rowBr2}},
@@ -1787,9 +1789,12 @@ func TestGetSelectResults(t *testing.T) {
 		},
 		{
 			name: "Multiple select operations with same correlation ID (deduplication)",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationSelect, CorrelationID: queryID, Table: "Bridge"},
-				{Op: ovsdb.OperationSelect, CorrelationID: queryID, Table: "Bridge"},
+			ops: func() []ovsdb.Operation {
+				op1 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op1, queryID)
+				op2 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op2, queryID)
+				return []ovsdb.Operation{op1, op2}
 			},
 			results: []ovsdb.OperationResult{
 				{Rows: []ovsdb.Row{rowBr1, rowBr3}},
@@ -1810,10 +1815,12 @@ func TestGetSelectResults(t *testing.T) {
 		},
 		{
 			name: "Mixed Operations: non-select ops are ignored",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationInsert}, // Non-select op
-				{Op: ovsdb.OperationSelect, CorrelationID: queryID, Table: "Bridge"}, // Select op
-				{Op: ovsdb.OperationDelete}, // Non-select op
+			ops: func() []ovsdb.Operation {
+				op1 := ovsdb.Operation{Op: ovsdb.OperationInsert}                  // Non-select op
+				op2 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"} // Select op
+				ovsdb.SetCorrelationID(&op2, queryID)
+				op3 := ovsdb.Operation{Op: ovsdb.OperationDelete} // Non-select op
+				return []ovsdb.Operation{op1, op2, op3}
 			},
 			results: []ovsdb.OperationResult{
 				{Count: 1},                  // Result for Insert
@@ -1829,9 +1836,12 @@ func TestGetSelectResults(t *testing.T) {
 		},
 		{
 			name: "Multi-table select: only target table results are included (Bridge target)",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationSelect, CorrelationID: "bridge-query", Table: "Bridge"},
-				{Op: ovsdb.OperationSelect, CorrelationID: "ovs-query", Table: "Open_vSwitch"},
+			ops: func() []ovsdb.Operation {
+				op1 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op1, "bridge-query")
+				op2 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Open_vSwitch"}
+				ovsdb.SetCorrelationID(&op2, "ovs-query")
+				return []ovsdb.Operation{op1, op2}
 			},
 			results: []ovsdb.OperationResult{
 				{Rows: []ovsdb.Row{rowBr1, rowBr2}}, // Bridge results
@@ -1855,9 +1865,12 @@ func TestGetSelectResults(t *testing.T) {
 		},
 		{
 			name: "Multi-table select: only target table results are included (OpenvSwitch target)",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationSelect, CorrelationID: "bridge-query", Table: "Bridge"},
-				{Op: ovsdb.OperationSelect, CorrelationID: "ovs-query", Table: "Open_vSwitch"},
+			ops: func() []ovsdb.Operation {
+				op1 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op1, "bridge-query")
+				op2 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Open_vSwitch"}
+				ovsdb.SetCorrelationID(&op2, "ovs-query")
+				return []ovsdb.Operation{op1, op2}
 			},
 			results: []ovsdb.OperationResult{
 				{Rows: []ovsdb.Row{rowBr1, rowBr2}}, // Bridge results
@@ -1874,7 +1887,7 @@ func TestGetSelectResults(t *testing.T) {
 		},
 		{
 			name:          "Error: mismatched ops and results length",
-			ops:           []ovsdb.Operation{{}},
+			ops:           func() []ovsdb.Operation { return []ovsdb.Operation{{}} },
 			results:       []ovsdb.OperationResult{{}, {}},
 			target:        &[]*Bridge{},
 			expectError:   true,
@@ -1882,8 +1895,10 @@ func TestGetSelectResults(t *testing.T) {
 		},
 		{
 			name: "Error: OVSDB error in result",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationSelect, CorrelationID: queryID, Table: "Bridge"},
+			ops: func() []ovsdb.Operation {
+				op := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op, queryID)
+				return []ovsdb.Operation{op}
 			},
 			results: []ovsdb.OperationResult{
 				{Error: "some ovsdb error", Details: "details here"},
@@ -1895,9 +1910,12 @@ func TestGetSelectResults(t *testing.T) {
 
 		{
 			name: "Success: same table with different correlation IDs - returns first group by default",
-			ops: []ovsdb.Operation{
-				{Op: ovsdb.OperationSelect, CorrelationID: "query-1", Table: "Bridge"},
-				{Op: ovsdb.OperationSelect, CorrelationID: "query-2", Table: "Bridge"},
+			ops: func() []ovsdb.Operation {
+				op1 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op1, "query-1")
+				op2 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+				ovsdb.SetCorrelationID(&op2, "query-2")
+				return []ovsdb.Operation{op1, op2}
 			},
 			results: []ovsdb.OperationResult{
 				{Rows: []ovsdb.Row{rowBr1}},
@@ -1926,9 +1944,9 @@ func TestGetSelectResults(t *testing.T) {
 			// Use the generic API directly with the target type
 			dbModel := ovs.Cache().DatabaseModel()
 			if bridges, ok := tt.target.(*[]*Bridge); ok {
-				err = GetSelectResults(dbModel, tt.ops, tt.results, bridges, nil)
+				err = GetSelectResults(dbModel, tt.ops(), tt.results, bridges, nil)
 			} else if ovsRows, ok := tt.target.(*[]*OpenvSwitch); ok {
-				err = GetSelectResults(dbModel, tt.ops, tt.results, ovsRows, nil)
+				err = GetSelectResults(dbModel, tt.ops(), tt.results, ovsRows, nil)
 			} else {
 				t.Fatalf("Unsupported target type: %T", tt.target)
 			}
@@ -1947,10 +1965,11 @@ func TestGetSelectResults(t *testing.T) {
 
 	// Test index parameter functionality
 	t.Run("Index parameter test", func(t *testing.T) {
-		ops := []ovsdb.Operation{
-			{Op: ovsdb.OperationSelect, CorrelationID: "query-1", Table: "Bridge"},
-			{Op: ovsdb.OperationSelect, CorrelationID: "query-2", Table: "Bridge"},
-		}
+		op1 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+		ovsdb.SetCorrelationID(&op1, "query-1")
+		op2 := ovsdb.Operation{Op: ovsdb.OperationSelect, Table: "Bridge"}
+		ovsdb.SetCorrelationID(&op2, "query-2")
+		ops := []ovsdb.Operation{op1, op2}
 		results := []ovsdb.OperationResult{
 			{Rows: []ovsdb.Row{rowBr1}},
 			{Rows: []ovsdb.Row{rowBr2}},

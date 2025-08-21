@@ -726,12 +726,12 @@ func (a api) Select(columns ...string) ([]ovsdb.Operation, error) {
 	operations := make([]ovsdb.Operation, 0, len(ovsdbConditionsList))
 	for _, whereClause := range ovsdbConditionsList {
 		selectOp := ovsdb.Operation{
-			Op:            ovsdb.OperationSelect,
-			Table:         tableName,
-			Where:         whereClause,
-			Columns:       columnsToSelect,
-			CorrelationID: correlationID,
+			Op:      ovsdb.OperationSelect,
+			Table:   tableName,
+			Where:   whereClause,
+			Columns: columnsToSelect,
 		}
+		ovsdb.SetCorrelationID(&selectOp, correlationID)
 		operations = append(operations, selectOp)
 	}
 
@@ -754,12 +754,13 @@ func (a api) SelectAll(m model.Model, columns ...string) (ovsdb.Operation, error
 	}
 
 	correlationID := uuid.NewString()
-	return ovsdb.Operation{
+	op = ovsdb.Operation{
 		Op:    ovsdb.OperationSelect,
 		Table: tableName,
 		// fetch all
-		Where:         []ovsdb.Condition{},
-		Columns:       columnsToSelect,
-		CorrelationID: correlationID,
-	}, nil
+		Where:   []ovsdb.Condition{},
+		Columns: columnsToSelect,
+	}
+	ovsdb.SetCorrelationID(&op, correlationID)
+	return op, nil
 }

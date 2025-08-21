@@ -1498,12 +1498,13 @@ func GetSelectResults[T model.Model](dbModel model.DatabaseModel, ops []ovsdb.Op
 	correlationIDOrder := make([]string, 0)                           // preserve order of correlation IDs
 
 	for i, op := range ops {
+		correlationID := ovsdb.GetCorrelationID(op)
 		if op.Op == ovsdb.OperationSelect && op.Table == targetTable {
-			if _, exists := targetTableOperations[op.CorrelationID]; !exists {
-				correlationIDOrder = append(correlationIDOrder, op.CorrelationID)
-				targetTableOperations[op.CorrelationID] = make([]ovsdb.OperationResult, 0)
+			if _, exists := targetTableOperations[correlationID]; !exists {
+				correlationIDOrder = append(correlationIDOrder, correlationID)
+				targetTableOperations[correlationID] = make([]ovsdb.OperationResult, 0)
 			}
-			targetTableOperations[op.CorrelationID] = append(targetTableOperations[op.CorrelationID], results[i])
+			targetTableOperations[correlationID] = append(targetTableOperations[correlationID], results[i])
 		}
 	}
 
