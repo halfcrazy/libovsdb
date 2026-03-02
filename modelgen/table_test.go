@@ -76,7 +76,7 @@ type (
 	AtomicTableUUIDEnum    = string
 )
 
-var (
+const (
 	AtomicTableBooleanEnumtrue                              AtomicTableBooleanEnum = true
 	AtomicTableBooleanEnumfalse                             AtomicTableBooleanEnum = false
 	AtomicTableEventTypeEmptyLbBackends                     AtomicTableEventType   = "empty_lb_backends"
@@ -160,7 +160,7 @@ type (
 	AtomicTableUUIDEnum    = string
 )
 
-var (
+const (
 	AtomicTableBooleanEnumtrue                              AtomicTableBooleanEnum = true
 	AtomicTableBooleanEnumfalse                             AtomicTableBooleanEnum = false
 	AtomicTableEventTypeEmptyLbBackends                     AtomicTableEventType   = "empty_lb_backends"
@@ -224,7 +224,7 @@ type (
 	AtomicTableUUIDEnum    = string
 )
 
-var (
+const (
 	AtomicTableBooleanEnumtrue                              AtomicTableBooleanEnum = true
 	AtomicTableBooleanEnumfalse                             AtomicTableBooleanEnum = false
 	AtomicTableEventTypeEmptyLbBackends                     AtomicTableEventType   = "empty_lb_backends"
@@ -418,7 +418,7 @@ type (
 	AtomicTableUUIDEnum    = string
 )
 
-var (
+const (
 	AtomicTableBooleanEnumtrue                              AtomicTableBooleanEnum = true
 	AtomicTableBooleanEnumfalse                             AtomicTableBooleanEnum = false
 	AtomicTableEventTypeEmptyLbBackends                     AtomicTableEventType   = "empty_lb_backends"
@@ -741,7 +741,7 @@ type (
 	AtomicTableUUIDEnum    = string
 )
 
-var (
+const (
 	AtomicTableBooleanEnumtrue                              AtomicTableBooleanEnum = true
 	AtomicTableBooleanEnumfalse                             AtomicTableBooleanEnum = false
 	AtomicTableEventTypeEmptyLbBackends                     AtomicTableEventType   = "empty_lb_backends"

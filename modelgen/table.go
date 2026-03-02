@@ -29,18 +29,13 @@ import "github.com/ovn-kubernetes/libovsdb/model"
 {{- $structName := index . "StructName" }}
 {{- range $field := index . "Fields" }}
 {{- $fieldName := FieldName $field.Column }}
-{{- $type := "" }}
-{{- if index $ "WithEnumTypes" }}
-{{- $type = FieldTypeWithEnums $tableName $field.Column $field.Schema }}
-{{- else }}
-{{- $type = FieldType $tableName $field.Column $field.Schema }}
-{{- end }}
+{{- $type := FieldTypeFromContext $ $field }}
 
 func (a *{{ $structName }}) Get{{ $fieldName }}() {{ $type }} {
 	return a.{{ $fieldName }}
 }
 
-{{ if or (eq (index $type 0) '*') (eq (slice $type 0 2) "[]") (eq (slice $type 0 3) "map") }}
+{{ if IsCopyableType $type }}
 func copy{{ $structName }}{{ $fieldName }}(a {{ $type }}) {{ $type }} {
 	if a == nil {
 		return nil
@@ -100,13 +95,8 @@ func (a *{{ $structName }}) DeepCopyInto(b *{{ $structName }}) {
 	*b = *a
 	{{- range $field := index . "Fields" }}
 	{{- $fieldName := FieldName $field.Column }}
-	{{- $type := "" }}
-	{{- if index $ "WithEnumTypes" }}
-	{{- $type = FieldTypeWithEnums $tableName $field.Column $field.Schema }}
-	{{- else }}
-	{{- $type = FieldType $tableName $field.Column $field.Schema }}
-	{{- end }}
-	{{- if or (eq (index $type 0) '*') (eq (slice $type 0 2) "[]") (eq (slice $type 0 3) "map") }}
+	{{- $type := FieldTypeFromContext $ $field }}
+	{{- if IsCopyableType $type }}
 	b.{{ $fieldName }} = copy{{ $structName }}{{ $fieldName }}(a.{{ $fieldName }})
 	{{- end }}
 	{{- end }}
@@ -131,15 +121,10 @@ func (a *{{ $structName }}) CloneModel() model.Model {
 func (a *{{ $structName }}) Equals(b *{{ $structName }}) bool {
 	{{- range $i, $field := index . "Fields" }}
 	{{- $fieldName := FieldName $field.Column }}
-	{{- $type := "" }}
-	{{- if index $ "WithEnumTypes" }}
-	{{- $type = FieldTypeWithEnums $tableName $field.Column $field.Schema }}
-	{{- else }}
-	{{- $type = FieldType $tableName $field.Column $field.Schema }}
-	{{- end }}
+	{{- $type := FieldTypeFromContext $ $field }}
 	{{- if $i }}&&
 	{{ else }}return {{ end }}
-	{{- if or (eq (index $type 0) '*') (eq (slice $type 0 2) "[]") (eq (slice $type 0 3) "map") -}}
+	{{- if IsCopyableType $type -}}
 	equal{{ $structName }}{{ $fieldName }}(a.{{ $fieldName }}, b.{{ $fieldName }})
 	{{- else -}}
 	a.{{ $fieldName }} == b.{{ $fieldName }}
@@ -187,14 +172,16 @@ var _ model.ComparableModel = &{{ $structName }}{}
 func NewTableTemplate() *template.Template {
 	return template.Must(template.New("").Funcs(
 		template.FuncMap{
-			"PrintVal":           printVal,
-			"FieldName":          FieldName,
-			"FieldType":          FieldType,
-			"FieldTypeWithEnums": FieldTypeWithEnums,
-			"OvsdbTag":           Tag,
-			"ValidationTag":      ValidationTag,
-			"AtomicType":         AtomicType,
-			"EnumAliasSuffix":    enumAliasSuffix,
+			"PrintVal":             printVal,
+			"FieldName":            FieldName,
+			"FieldType":            FieldType,
+			"FieldTypeWithEnums":   FieldTypeWithEnums,
+			"FieldTypeFromContext": FieldTypeFromContext,
+			"IsCopyableType":       IsCopyableType,
+			"OvsdbTag":             Tag,
+			"ValidationTag":        ValidationTag,
+			"AtomicType":           AtomicType,
+			"EnumAliasSuffix":      enumAliasSuffix,
 		},
 	).Parse(extendedGenTemplate + `
 {{- define "header" }}
@@ -223,11 +210,11 @@ type (
 {{- end }}
 )
 
-var (
-{{ range  index . "Enums" }}
+const (
+{{ range index . "Enums" }}
 {{- $e := . }}
 {{- range .Sets }}
-{{ $e.Alias }}{{ EnumAliasSuffix . $e.Type }} {{ $e.Alias }} = {{ PrintVal . $e.Type }}
+	{{ $e.Alias }}{{ EnumAliasSuffix . $e.Type }} {{ $e.Alias }} = {{ PrintVal . $e.Type }}
 {{- end }}
 {{- end }}
 )
@@ -242,14 +229,11 @@ package {{ index . "PackageName" }}
 {{ template "enums" . }}
 {{ template "structComment" . }}
 type {{ index . "StructName" }} struct {
-{{- $tableName := index . "TableName" }}
-{{ if index . "WithEnumTypes" }}
-{{ range $field := index . "Fields" }}	{{ FieldName $field.Column }}  {{ FieldTypeWithEnums $tableName $field.Column $field.Schema }} ` + "`" + `{{ OvsdbTag $field.Column }}{{ ValidationTag $field.Schema }}{{ template "extraTags" . }}` + "`" + `
-{{ end }}
-{{ else }}
-{{ range  $field := index . "Fields" }}	{{ FieldName $field.Column }}  {{ FieldType $tableName $field.Column $field.Schema }} ` + "`" + `{{ OvsdbTag $field.Column }}{{ ValidationTag $field.Schema }}{{ template "extraTags" . }}` + "`" + `
-{{ end }}
-{{ end }}
+{{- $root := . }}
+{{- range $field := index . "Fields" }}
+	{{ FieldName $field.Column }}  {{ FieldTypeFromContext $root $field }} ` + "`" + `{{ OvsdbTag $field.Column }}{{ ValidationTag $field.Schema }}{{ template "extraTags" $root }}` + "`" + `
+{{- end }}
+
 {{ template "extraFields" . }}
 }
 {{ template "postStructDefinitions" . }}
@@ -386,6 +370,32 @@ func FieldType(tableName, columnName string, column *ovsdb.ColumnSchema) string 
 // are expanded into their own types
 func FieldTypeWithEnums(tableName, columnName string, column *ovsdb.ColumnSchema) string {
 	return fieldType(tableName, columnName, column, true)
+}
+
+// FieldTypeFromContext returns the field type string using template context (TableName, WithEnumTypes) and field.
+// Used in templates to avoid repeating the WithEnumTypes branch.
+func FieldTypeFromContext(ctx map[string]any, field Field) string {
+	tableName := ctx["TableName"].(string)
+	withEnums, _ := ctx["WithEnumTypes"].(bool)
+	return fieldType(tableName, field.Column, field.Schema, withEnums)
+}
+
+// IsCopyableType reports whether the type string denotes a type that needs deep copy (pointer, slice, or map).
+// Used in templates to avoid repeating the same condition.
+func IsCopyableType(typeStr string) bool {
+	if typeStr == "" {
+		return false
+	}
+	switch typeStr[0] {
+	case '*':
+		return true
+	case '[':
+		return len(typeStr) >= 2 && typeStr[1] == ']'
+	case 'm':
+		return len(typeStr) >= 3 && typeStr[:3] == "map"
+	default:
+		return false
+	}
 }
 
 // FieldEnum returns the Enum if the column is an enum type
